@@ -8,24 +8,27 @@
 Python 版本需求 >= 3.9
 
 ## 现有功能
+
 - 基于 Crisp 客服系统
 - 基于 Telegram 话题群将消息分栏
 - 自动推送文字、图片到指定聊天
 - 支持回复后推送回对应客户
-- 兼容V2B以显示套餐信息
-- 关键词回复以及基于GPT的智能回复
+- 兼容 V2B 以显示套餐信息
+- 关键词回复以及基于 GPT 的智能回复
 
 ## 计划功能
-- 回复图片功能（需要Crisp订阅）
+
+- 回复图片功能（需要 Crisp 订阅）
 
 ## 常规使用
+
 ```
 # apt install git 如果你没有git的话
 git clone https://github.com/DyAxy/Crisp-Telegram-Bot.git
 # 进程常驻可参考 screen 或 nohup 或 systemctl
 # 你需要安装好 pip3 的包管理
 cd Crisp-Telegram-Bot
-pip3 install -r requirements.txt
+pip3 install -r requirements.txt --break-system-packages
 cp config.yml.example config.yml
 nano config.yml
 # 根据注释中的内容修改配置
@@ -35,9 +38,9 @@ python3 bot.py
 ## 申请 Telegram Bot Token
 
 1. 私聊 [https://t.me/BotFather](https://https://t.me/BotFather)
-2. 输入 `/newbot`，并为你的bot起一个**响亮**的名字
-3. 接着为你的bot设置一个username，但是一定要以bot结尾，例如：`v2board_bot`
-4. 最后你就能得到bot的token了，看起来应该像这样：`123456789:gaefadklwdqojdoiqwjdiwqdo`
+2. 输入 `/newbot`，并为你的 bot 起一个**响亮**的名字
+3. 接着为你的 bot 设置一个 username，但是一定要以 bot 结尾，例如：`v2board_bot`
+4. 最后你就能得到 bot 的 token 了，看起来应该像这样：`123456789:gaefadklwdqojdoiqwjdiwqdo`
 
 ## 创建 Telegram Topic 群
 
@@ -48,10 +51,10 @@ python3 bot.py
 ## 申请 Crisp 以及 MarketPlace 插件
 
 1. 注册 [https://app.crisp.chat/initiate/signup](https://app.crisp.chat/initiate/signup)
-2. 完成注册后，网站ID在浏览器中即可找到，看起来应该像这样：`https://app.crisp.chat/settings/website/12345678-1234-1234-1234-1234567890ab/`
-3. 其中 `12345678-1234-1234-1234-1234567890ab` 就是网站ID
+2. 完成注册后，网站 ID 在浏览器中即可找到，看起来应该像这样：`https://app.crisp.chat/settings/website/12345678-1234-1234-1234-1234567890ab/`
+3. 其中 `12345678-1234-1234-1234-1234567890ab` 就是网站 ID
 4. 前往 MarketPlace， 需要重新注册账号 [https://marketplace.crisp.chat/](https://marketplace.crisp.chat/)
-5. 点击 New Plugin，选择 Private，输入名字以及描述。会获得开发者ID和Key，可能会不够用。
-6. 需要Production Key，点击 Ask a production token，再点击Add a Scope。
-7. 需要 2 条read和write权限：`website:conversation:sessions` 和 `website:conversation:messages`
-8. 保存后即可获得ID和Key，此时点击右上角 Install Plugin on Website 即可。
+5. 点击 New Plugin，选择 Private，输入名字以及描述。会获得开发者 ID 和 Key，可能会不够用。
+6. 需要 Production Key，点击 Ask a production token，再点击 Add a Scope。
+7. 需要 2 条 read 和 write 权限：`website:conversation:sessions` 和 `website:conversation:messages`
+8. 保存后即可获得 ID 和 Key，此时点击右上角 Install Plugin on Website 即可。
