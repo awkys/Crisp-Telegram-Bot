@@ -10,7 +10,7 @@ crisp:
   # 插件秘钥
   key: d54db42b34167a03d43eba448e7ece89123bdfe268a6603131d52502bd613c03
   # 网站 ID
-  website: 7da72933-809a-436e-b6bf-cd7af35fadcd
+  website: 618a259b-40f5-4c35-8ebb-8d1bbb7aaafa
 
 easyimages:
   apiUrl: "http://127.0.0.1/api/index.php"
