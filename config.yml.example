@@ -1,15 +1,15 @@
 bot:
   # Bot Token
-  token: 1234:1234567890abcdef
+  token: 6618339544:AAG0jEk0NEPsR2WDu3eRvBddmI8A96457VE
   # 发送至群
   groupId: 0
 crisp:
   # 插件 ID
-  id:
+  id:e49b0220-5c0c-4764-a410-e5ce2f6f7ccd
   # 插件秘钥
-  key:
+  key:840056fe684acabaa163e740972077e84e375ad814bf346204941d3c9a50b67d
   # 网站 ID
-  website:
+  website:7da72933-809a-436e-b6bf-cd7af35fadcd
 easyimages:
   apiUrl: "http://127.0.0.1/api/index.php"
   apiToken: "token"
