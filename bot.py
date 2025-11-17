@@ -1,8 +1,9 @@
-
 import os
 import yaml
 import logging
 import requests
+from datetime import datetime
+from threading import Lock
 
 from openai import OpenAI
 from crisp_api import Crisp
@@ -18,50 +19,121 @@ logging.basicConfig(
 # set higher logging level for httpx to avoid all GET and POST requests being logged
 logging.getLogger("httpx").setLevel(logging.WARNING)
 
-# Load Config
-try:
-    f = open('config.yml', 'r')
-    config = yaml.safe_load(f)
-except FileNotFoundError as error:
-    logging.warning('没有找到 config.yml，请复制 config.yml.example 并重命名为 config.yml')
-    exit(1)
+# 配置管理类
+class ConfigManager:
+    def __init__(self, config_file='config.yml'):
+        self.config_file = config_file
+        self.config = None
+        self.last_modified = None
+        self.lock = Lock()
+        self.crisp_client = None
+        self.openai_client = None
+        self.load_config()
+    
+    def load_config(self):
+        """加载配置文件"""
+        try:
+            with self.lock:
+                with open(self.config_file, 'r', encoding='utf-8') as f:
+                    self.config = yaml.safe_load(f)
+                self.last_modified = os.path.getmtime(self.config_file)
+                logging.info(f"配置文件已加载: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+                
+                # 重新初始化客户端
+                self._init_crisp()
+                self._init_openai()
+                
+        except FileNotFoundError:
+            logging.error('没有找到 config.yml，请复制 config.yml.example 并重命名为 config.yml')
+            raise
+        except Exception as e:
+            logging.error(f'加载配置文件失败: {e}')
+            raise
+    
+    def _init_crisp(self):
+        """初始化 Crisp 客户端"""
+        try:
+            crisp_cfg = self.config['crisp']
+            self.crisp_client = Crisp()
+            self.crisp_client.set_tier("plugin")
+            self.crisp_client.authenticate(crisp_cfg['id'], crisp_cfg['key'])
+            self.crisp_client.plugin.get_connect_account()
+            self.crisp_client.website.get_website(crisp_cfg['website'])
+            logging.info('Crisp 客户端初始化成功')
+        except Exception as e:
+            logging.warning(f'无法连接 Crisp 服务: {e}')
+            self.crisp_client = None
+    
+    def _init_openai(self):
+        """初始化 OpenAI 客户端"""
+        try:
+            openai_cfg = self.config['openai']
+            self.openai_client = OpenAI(
+                api_key=openai_cfg['apiKey'],
+                base_url='https://api.openai.com/v1'
+            )
+            self.openai_client.models.list()
+            logging.info('OpenAI 客户端初始化成功')
+        except Exception as e:
+            logging.warning(f'无法连接 OpenAI 服务: {e}')
+            self.openai_client = None
+    
+    def check_and_reload(self):
+        """检查配置文件是否更新，如果更新则重新加载"""
+        try:
+            current_modified = os.path.getmtime(self.config_file)
+            if current_modified != self.last_modified:
+                logging.info('检测到配置文件更新，正在重新加载...')
+                self.load_config()
+                return True
+        except Exception as e:
+            logging.error(f'检查配置文件更新失败: {e}')
+        return False
+    
+    def get(self, *keys, default=None):
+        """安全获取配置项"""
+        self.check_and_reload()  # 每次获取前检查更新
+        value = self.config
+        for key in keys:
+            if isinstance(value, dict):
+                value = value.get(key, default)
+            else:
+                return default
+        return value if value is not None else default
+    
+    def get_crisp_client(self):
+        """获取 Crisp 客户端"""
+        self.check_and_reload()
+        return self.crisp_client
+    
+    def get_openai_client(self):
+        """获取 OpenAI 客户端"""
+        self.check_and_reload()
+        return self.openai_client
 
-# Connect Crisp
-try:
-    crispCfg = config['crisp']
-    client = Crisp()
-    client.set_tier("plugin")
-    client.authenticate(crispCfg['id'], crispCfg['key'])
-    client.plugin.get_connect_account()
-    client.website.get_website(crispCfg['website'])
-except Exception as error:
-    logging.warning('无法连接 Crisp 服务，请确认 Crisp 配置项是否正确')
-    exit(1)
+# 创建全局配置管理器
+config_manager = ConfigManager()
 
-# Connect OpenAI
-try:
-    openai = OpenAI(api_key=config['openai']['apiKey'],base_url='https://api.openai.com/v1')
-    openai.models.list()
-except Exception as error:
-    logging.warning('无法连接 OpenAI 服务，智能化回复将不会使用')
-    openai = None
-
-def changeButton(sessionId,boolean):
+def changeButton(sessionId, boolean):
     return InlineKeyboardMarkup(
         [
             [InlineKeyboardButton(
                 text='关闭 AI 回复' if boolean else '打开 AI 回复',
                 callback_data=f'{sessionId},{boolean}'
-                )
-            ]
+            )]
         ]
     )
 
 async def onReply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     msg = update.effective_message
-
-    if msg.chat_id != config['bot']['groupId']:
+    
+    # 动态获取配置
+    group_id = config_manager.get('bot', 'groupId')
+    crisp_client = config_manager.get_crisp_client()
+    
+    if msg.chat_id != group_id or crisp_client is None:
         return
+    
     for sessionId in context.bot_data:
         if context.bot_data[sessionId]['topicId'] == msg.message_thread_id:
             query = {
@@ -74,16 +146,12 @@ async def onReply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                     "avatar": 'https://bpic.51yuansu.com/pic3/cover/03/47/92/65e3b3b1eb909_800.jpg'
                 }
             }
-            client.website.send_message_in_conversation(
-                config['crisp']['website'],
+            crisp_client.website.send_message_in_conversation(
+                config_manager.get('crisp', 'website'),
                 sessionId,
                 query
             )
             return
-
-# EasyImages Config
-EASYIMAGES_API_URL = config.get('easyimages', {}).get('apiUrl', '')
-EASYIMAGES_API_TOKEN = config.get('easyimages', {}).get('apiToken', '')
 
 async def handleImage(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.effective_message
@@ -101,8 +169,16 @@ async def handleImage(update: Update, context: ContextTypes.DEFAULT_TYPE):
         file = await context.bot.get_file(file_id)
         file_url = file.file_path
 
+        # 动态获取 EasyImages 配置
+        api_url = config_manager.get('easyimages', 'apiUrl', default='')
+        api_token = config_manager.get('easyimages', 'apiToken', default='')
+        
+        if not api_url or not api_token:
+            await msg.reply_text("EasyImages 配置不完整，无法上传图片。")
+            return
+
         # 上传图片到 EasyImages
-        uploaded_url = upload_image_to_easyimages(file_url)
+        uploaded_url = upload_image_to_easyimages(file_url, api_url, api_token)
 
         # 生成 Markdown 格式的链接
         markdown_link = f"![Image]({uploaded_url})"
@@ -120,16 +196,16 @@ async def handleImage(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.reply_text("图片上传失败，请稍后重试。")
         logging.error(f"图片上传错误: {e}")
 
-def upload_image_to_easyimages(file_url):
+def upload_image_to_easyimages(file_url, api_url, api_token):
     try:
         response = requests.get(file_url, stream=True)
         response.raise_for_status()
 
         files = {
             'image': ('image.jpg', response.raw, 'image/jpeg'),
-            'token': (None, EASYIMAGES_API_TOKEN)
+            'token': (None, api_token)
         }
-        res = requests.post(EASYIMAGES_API_URL, files=files)
+        res = requests.post(api_url, files=files)
         res_data = res.json()
 
         if res_data.get("result") == "success":
@@ -148,10 +224,13 @@ def get_target_session_id(context, thread_id):
 
 def send_markdown_to_client(session_id, markdown_link):
     try:
-        # 将 Markdown 图片链接作为纯文本发送
+        crisp_client = config_manager.get_crisp_client()
+        if crisp_client is None:
+            raise Exception("Crisp 客户端未初始化")
+        
         query = {
             "type": "text",
-            "content": markdown_link,  # 将图片链接当做普通文本
+            "content": markdown_link,
             "from": "operator",
             "origin": "chat",
             "user": {
@@ -159,8 +238,8 @@ def send_markdown_to_client(session_id, markdown_link):
                 "avatar": "https://bpic.51yuansu.com/pic3/cover/03/47/92/65e3b3b1eb909_800.jpg"
             }
         }
-        client.website.send_message_in_conversation(
-            config['crisp']['website'],
+        crisp_client.website.send_message_in_conversation(
+            config_manager.get('crisp', 'website'),
             session_id,
             query
         )
@@ -172,8 +251,9 @@ def send_markdown_to_client(session_id, markdown_link):
 async def onChange(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Parses the CallbackQuery and updates the message text."""
     query = update.callback_query
+    openai_client = config_manager.get_openai_client()
 
-    if openai is None:
+    if openai_client is None:
         await query.answer('无法设置此功能')
     else:
         data = query.data.split(',')
@@ -181,23 +261,33 @@ async def onChange(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         session["enableAI"] = not eval(data[1])
         await query.answer()
         try:
-             await query.edit_message_reply_markup(changeButton(data[0],session["enableAI"]))
+            await query.edit_message_reply_markup(changeButton(data[0], session["enableAI"]))
         except Exception as error:
-            print(error)
+            logging.error(f"更改按钮状态失败: {error}")
 
 def main():
     try:
-        app = Application.builder().token(config['bot']['token']).defaults(Defaults(parse_mode='HTML')).build()
+        # 动态获取 Bot Token
+        bot_token = config_manager.get('bot', 'token')
+        if not bot_token:
+            raise ValueError("Bot Token 未配置")
+        
+        app = Application.builder().token(bot_token).defaults(Defaults(parse_mode='HTML')).build()
+        
         # 启动 Bot
         if os.getenv('RUNNER_NAME') is not None:
             return
+        
         app.add_handler(MessageHandler(filters.TEXT, onReply))
         app.add_handler(MessageHandler(filters.PHOTO | filters.Document.IMAGE, handleImage))
         app.add_handler(CallbackQueryHandler(onChange))
-        app.job_queue.run_once(handler.exec,5,name='RTM')
+        app.job_queue.run_once(handler.exec, 5, name='RTM')
+        
+        logging.info("Telegram Bot 启动成功，配置支持热加载")
         app.run_polling(drop_pending_updates=True)
+        
     except Exception as error:
-        logging.warning('无法启动 Telegram Bot，请确认 Bot Token 是否正确，或者是否能连接 Telegram 服务器')
+        logging.error(f'无法启动 Telegram Bot: {error}')
         exit(1)
 
 
