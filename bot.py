@@ -10,8 +10,6 @@ from crisp_api import Crisp
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import Application, Defaults, MessageHandler, filters, ContextTypes, CallbackQueryHandler
 
-import handler
-
 # Enable logging
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
@@ -113,6 +111,11 @@ class ConfigManager:
 
 # 创建全局配置管理器
 config_manager = ConfigManager()
+
+# 为了兼容性，保留旧的访问方式
+config = config_manager.config
+client = None  # crisp client，将在需要时动态获取
+openai = None  # openai client，将在需要时动态获取
 
 def changeButton(sessionId, boolean):
     return InlineKeyboardMarkup(
@@ -281,6 +284,9 @@ def main():
         app.add_handler(MessageHandler(filters.TEXT, onReply))
         app.add_handler(MessageHandler(filters.PHOTO | filters.Document.IMAGE, handleImage))
         app.add_handler(CallbackQueryHandler(onChange))
+        
+        # 导入 handler 并执行
+        import handler
         app.job_queue.run_once(handler.exec, 5, name='RTM')
         
         logging.info("Telegram Bot 启动成功，配置支持热加载")

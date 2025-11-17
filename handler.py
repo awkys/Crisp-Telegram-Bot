@@ -1,181 +1,304 @@
-
-import bot
-import json
-import base64
-import socketio
+import os
+import yaml
+import logging
 import requests
-from telegram.ext import ContextTypes
+from datetime import datetime
+from threading import Lock
 
-config = bot.config
-client = bot.client
-openai = bot.openai
-changeButton = bot.changeButton
-groupId = config["bot"]["groupId"]
-websiteId = config["crisp"]["website"]
-payload = config["openai"]["payload"]
+from openai import OpenAI
+from crisp_api import Crisp
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.ext import Application, Defaults, MessageHandler, filters, ContextTypes, CallbackQueryHandler
 
-def getKey(content: str):
-    if len(config["autoreply"]) > 0:
-        for x in config["autoreply"]:
-            keyword = x.split("|")
-            for key in keyword:
-                if key in content:
-                    return True, config["autoreply"][x]
-    return False, None
+# Enable logging
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
+)
+# set higher logging level for httpx to avoid all GET and POST requests being logged
+logging.getLogger("httpx").setLevel(logging.WARNING)
 
-def getMetas(sessionId):
-    metas = client.website.get_conversation_metas(websiteId, sessionId)
-
-    flow = ['📠<b>Crisp消息推送</b>','']
-    if len(metas["email"]) > 0:
-        email = metas["email"]
-        flow.append(f'📧<b>电子邮箱</b>：{email}')
-    if len(metas["data"]) > 0:
-        if "Plan" in metas["data"]:
-            Plan = metas["data"]["Plan"]
-            flow.append(f"🪪<b>使用套餐</b>：{Plan}")
-        if "UsedTraffic" in metas["data"] and "AllTraffic" in metas["data"]:
-            UsedTraffic = metas["data"]["UsedTraffic"]
-            AllTraffic = metas["data"]["AllTraffic"]
-            flow.append(f"🗒<b>流量信息</b>：{UsedTraffic} / {AllTraffic}")
-    if len(flow) > 2:
-        return '\n'.join(flow)
-    return '无额外信息'
-
-
-async def createSession(data):
-    bot = callbackContext.bot
-    botData = callbackContext.bot_data
-    sessionId = data["session_id"]
-    session = botData.get(sessionId)
-
-    metas = getMetas(sessionId)
-    if session is None:
-        enableAI = False if openai is None else True
-        topic = await bot.create_forum_topic(
-            groupId,data["user"]["nickname"])
-        msg = await bot.send_message(
-            groupId,
-            metas,
-            message_thread_id=topic.message_thread_id,
-            reply_markup=changeButton(sessionId,enableAI)
-            )
-        botData[sessionId] = {
-            'topicId': topic.message_thread_id,
-            'messageId': msg.message_id,
-            'enableAI': enableAI
-        }
-    else:
+# 配置管理类
+class ConfigManager:
+    def __init__(self, config_file='config.yml'):
+        self.config_file = config_file
+        self.config = None
+        self.last_modified = None
+        self.lock = Lock()
+        self.crisp_client = None
+        self.openai_client = None
+        self.load_config()
+    
+    def load_config(self):
+        """加载配置文件"""
         try:
-            await bot.edit_message_text(metas,groupId,session['messageId'])
-        except Exception as error:
-            print(error)
+            with self.lock:
+                with open(self.config_file, 'r', encoding='utf-8') as f:
+                    self.config = yaml.safe_load(f)
+                self.last_modified = os.path.getmtime(self.config_file)
+                logging.info(f"配置文件已加载: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+                
+                # 重新初始化客户端
+                self._init_crisp()
+                self._init_openai()
+                
+        except FileNotFoundError:
+            logging.error('没有找到 config.yml，请复制 config.yml.example 并重命名为 config.yml')
+            raise
+        except Exception as e:
+            logging.error(f'加载配置文件失败: {e}')
+            raise
+    
+    def _init_crisp(self):
+        """初始化 Crisp 客户端"""
+        try:
+            crisp_cfg = self.config['crisp']
+            self.crisp_client = Crisp()
+            self.crisp_client.set_tier("plugin")
+            self.crisp_client.authenticate(crisp_cfg['id'], crisp_cfg['key'])
+            self.crisp_client.plugin.get_connect_account()
+            self.crisp_client.website.get_website(crisp_cfg['website'])
+            logging.info('Crisp 客户端初始化成功')
+        except Exception as e:
+            logging.warning(f'无法连接 Crisp 服务: {e}')
+            self.crisp_client = None
+    
+    def _init_openai(self):
+        """初始化 OpenAI 客户端"""
+        try:
+            openai_cfg = self.config['openai']
+            self.openai_client = OpenAI(
+                api_key=openai_cfg['apiKey'],
+                base_url='https://api.openai.com/v1'
+            )
+            self.openai_client.models.list()
+            logging.info('OpenAI 客户端初始化成功')
+        except Exception as e:
+            logging.warning(f'无法连接 OpenAI 服务: {e}')
+            self.openai_client = None
+    
+    def check_and_reload(self):
+        """检查配置文件是否更新，如果更新则重新加载"""
+        try:
+            current_modified = os.path.getmtime(self.config_file)
+            if current_modified != self.last_modified:
+                logging.info('检测到配置文件更新，正在重新加载...')
+                self.load_config()
+                return True
+        except Exception as e:
+            logging.error(f'检查配置文件更新失败: {e}')
+        return False
+    
+    def get(self, *keys, default=None):
+        """安全获取配置项"""
+        self.check_and_reload()  # 每次获取前检查更新
+        value = self.config
+        for key in keys:
+            if isinstance(value, dict):
+                value = value.get(key, default)
+            else:
+                return default
+        return value if value is not None else default
+    
+    def get_crisp_client(self):
+        """获取 Crisp 客户端"""
+        self.check_and_reload()
+        return self.crisp_client
+    
+    def get_openai_client(self):
+        """获取 OpenAI 客户端"""
+        self.check_and_reload()
+        return self.openai_client
 
-async def sendMessage(data):
-    bot = callbackContext.bot
-    botData = callbackContext.bot_data
-    sessionId = data["session_id"]
-    session = botData.get(sessionId)
+# 创建全局配置管理器
+config_manager = ConfigManager()
 
-    client.website.mark_messages_read_in_conversation(websiteId,sessionId,
-        {"from": "user", "origin": "chat", "fingerprints": [data["fingerprint"]]}
+# 为了兼容性，保留旧的访问方式（供其他模块导入）
+config = config_manager.config  # 静态配置快照
+client = config_manager.get_crisp_client()  # Crisp 客户端
+openai = config_manager.get_openai_client()  # OpenAI 客户端
+
+# 导出给其他模块使用
+__all__ = ['config_manager', 'config', 'client', 'openai', 'changeButton']
+
+def changeButton(sessionId, boolean):
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton(
+                text='关闭 AI 回复' if boolean else '打开 AI 回复',
+                callback_data=f'{sessionId},{boolean}'
+            )]
+        ]
     )
 
-    if data["type"] == "text":
-        flow = ['📠<b>消息推送</b>','']
-        flow.append(f"🧾<b>消息内容</b>：{data['content']}")
-
-        result, autoreply = getKey(data["content"])
-        if result is True:
-            flow.append("")
-            flow.append(f"💡<b>自动回复</b>：{autoreply}")
-        elif openai is not None and session["enableAI"] is True:
-            response = openai.chat.completions.create(
-                model="gpt-3.5-turbo",
-                messages=[
-                    {"role": "system", "content": payload},
-                    {"role": "user", "content": data["content"]}
-                ]
-            )
-            autoreply = response.choices[0].message.content
-            flow.append("")
-            flow.append(f"💡<b>自动回复</b>：{autoreply}")
-        
-        if autoreply is not None:
+async def onReply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    msg = update.effective_message
+    
+    # 动态获取配置
+    group_id = config_manager.get('bot', 'groupId')
+    crisp_client = config_manager.get_crisp_client()
+    
+    if msg.chat_id != group_id or crisp_client is None:
+        return
+    
+    for sessionId in context.bot_data:
+        if context.bot_data[sessionId]['topicId'] == msg.message_thread_id:
             query = {
                 "type": "text",
-                "content": autoreply,
+                "content": msg.text,
                 "from": "operator",
                 "origin": "chat",
                 "user": {
-                    "nickname": '智能客服',
-                    "avatar": 'https://img.ixintu.com/download/jpg/20210125/8bff784c4e309db867d43785efde1daf_512_512.jpg'
+                    "nickname": '人工客服',
+                    "avatar": 'https://bpic.51yuansu.com/pic3/cover/03/47/92/65e3b3b1eb909_800.jpg'
                 }
             }
-            client.website.send_message_in_conversation(websiteId, sessionId, query)
-        await bot.send_message(
-            groupId,
-            '\n'.join(flow),
-            message_thread_id=session["topicId"]
-        )
-    elif data["type"] == "file" and str(data["content"]["type"]).count("image") > 0:
-        await bot.send_photo(
-            groupId,
-            data["content"]["url"],
-            message_thread_id=session["topicId"]
-        )
+            crisp_client.website.send_message_in_conversation(
+                config_manager.get('crisp', 'website'),
+                sessionId,
+                query
+            )
+            return
+
+async def handleImage(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.effective_message
+
+    if msg.photo:
+        file_id = msg.photo[-1].file_id
+    elif msg.document and msg.document.mime_type.startswith('image/'):
+        file_id = msg.document.file_id
     else:
-        print("Unhandled Message Type : ", data["type"])
-
-sio = socketio.AsyncClient(reconnection_attempts=5, logger=True)
-# Def Event Handlers
-@sio.on("connect")
-async def connect():
-    await sio.emit("authentication", {
-        "tier": "plugin",
-        "username": config["crisp"]["id"],
-        "password": config["crisp"]["key"],
-        "events": [
-            "message:send",
-            "session:set_data"
-        ]})
-@sio.on("unauthorized")
-async def unauthorized(data):
-    print('Unauthorized: ', data)
-@sio.event
-async def connect_error():
-    print("The connection failed!")
-@sio.event
-async def disconnect():
-    print("Disconnected from server.")
-@sio.on("message:send")
-async def messageForward(data):
-    if data["website_id"] != websiteId:
+        await msg.reply_text("请发送图片文件。")
         return
-    await createSession(data)
-    await sendMessage(data)
 
-# Meow!
-def getCrispConnectEndpoints():
-    url = "https://api.crisp.chat/v1/plugin/connect/endpoints"
+    try:
+        # 获取文件下载 URL
+        file = await context.bot.get_file(file_id)
+        file_url = file.file_path
 
-    authtier = base64.b64encode(
-        (config["crisp"]["id"] + ":" + config["crisp"]["key"]).encode("utf-8")
-    ).decode("utf-8")
-    payload = ""
-    headers = {"X-Crisp-Tier": "plugin", "Authorization": "Basic " + authtier}
-    response = requests.request("GET", url, headers=headers, data=payload)
-    endPoint = json.loads(response.text).get("data").get("socket").get("app")
-    return endPoint
+        # 动态获取 EasyImages 配置
+        api_url = config_manager.get('easyimages', 'apiUrl', default='')
+        api_token = config_manager.get('easyimages', 'apiToken', default='')
+        
+        if not api_url or not api_token:
+            await msg.reply_text("EasyImages 配置不完整，无法上传图片。")
+            return
 
-# Connecting to Crisp RTM(WSS) Server
-async def exec(context: ContextTypes.DEFAULT_TYPE):
-    global callbackContext
-    callbackContext = context
-    # await sendAllUnread()
-    await sio.connect(
-        getCrispConnectEndpoints(),
-        transports="websocket",
-        wait_timeout=10,
-    )
-    await sio.wait()
+        # 上传图片到 EasyImages
+        uploaded_url = upload_image_to_easyimages(file_url, api_url, api_token)
+
+        # 生成 Markdown 格式的链接
+        markdown_link = f"![Image]({uploaded_url})"
+
+        # 查找对应的 Crisp 会话 ID
+        session_id = get_target_session_id(context, msg.message_thread_id)
+        if session_id:
+            # 将 Markdown 链接推送给客户
+            send_markdown_to_client(session_id, markdown_link)
+            await msg.reply_text("图片已成功发送给客户！")
+        else:
+            await msg.reply_text("未找到对应的 Crisp 会话，无法发送给客户。")
+
+    except Exception as e:
+        await msg.reply_text("图片上传失败，请稍后重试。")
+        logging.error(f"图片上传错误: {e}")
+
+def upload_image_to_easyimages(file_url, api_url, api_token):
+    try:
+        response = requests.get(file_url, stream=True)
+        response.raise_for_status()
+
+        files = {
+            'image': ('image.jpg', response.raw, 'image/jpeg'),
+            'token': (None, api_token)
+        }
+        res = requests.post(api_url, files=files)
+        res_data = res.json()
+
+        if res_data.get("result") == "success":
+            return res_data["url"]
+        else:
+            raise Exception(f"Image upload failed: {res_data}")
+    except Exception as e:
+        logging.error(f"Error uploading image: {e}")
+        raise
+
+def get_target_session_id(context, thread_id):
+    for session_id, session_data in context.bot_data.items():
+        if session_data.get('topicId') == thread_id:
+            return session_id
+    return None
+
+def send_markdown_to_client(session_id, markdown_link):
+    try:
+        crisp_client = config_manager.get_crisp_client()
+        if crisp_client is None:
+            raise Exception("Crisp 客户端未初始化")
+        
+        query = {
+            "type": "text",
+            "content": markdown_link,
+            "from": "operator",
+            "origin": "chat",
+            "user": {
+                "nickname": "人工客服",
+                "avatar": "https://bpic.51yuansu.com/pic3/cover/03/47/92/65e3b3b1eb909_800.jpg"
+            }
+        }
+        crisp_client.website.send_message_in_conversation(
+            config_manager.get('crisp', 'website'),
+            session_id,
+            query
+        )
+        logging.info(f"图片链接已成功发送至 Crisp 会话 {session_id}")
+    except Exception as e:
+        logging.error(f"发送图片链接到 Crisp 失败: {e}")
+        raise
+
+async def onChange(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Parses the CallbackQuery and updates the message text."""
+    query = update.callback_query
+    openai_client = config_manager.get_openai_client()
+
+    if openai_client is None:
+        await query.answer('无法设置此功能')
+    else:
+        data = query.data.split(',')
+        session = context.bot_data.get(data[0])
+        session["enableAI"] = not eval(data[1])
+        await query.answer()
+        try:
+            await query.edit_message_reply_markup(changeButton(data[0], session["enableAI"]))
+        except Exception as error:
+            logging.error(f"更改按钮状态失败: {error}")
+
+def main():
+    try:
+        # 动态获取 Bot Token
+        bot_token = config_manager.get('bot', 'token')
+        if not bot_token:
+            raise ValueError("Bot Token 未配置")
+        
+        app = Application.builder().token(bot_token).defaults(Defaults(parse_mode='HTML')).build()
+        
+        # 启动 Bot
+        if os.getenv('RUNNER_NAME') is not None:
+            return
+        
+        app.add_handler(MessageHandler(filters.TEXT, onReply))
+        app.add_handler(MessageHandler(filters.PHOTO | filters.Document.IMAGE, handleImage))
+        app.add_handler(CallbackQueryHandler(onChange))
+        
+        # 导入 handler 并执行
+        import handler
+        app.job_queue.run_once(handler.exec, 5, name='RTM')
+        
+        logging.info("Telegram Bot 启动成功，配置支持热加载")
+        app.run_polling(drop_pending_updates=True)
+        
+    except Exception as error:
+        logging.error(f'无法启动 Telegram Bot: {error}')
+        exit(1)
+
+
+if __name__ == "__main__":
+    main()
