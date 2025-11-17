@@ -65,15 +65,26 @@ class ConfigManager:
     def _init_openai(self):
         """初始化 OpenAI 客户端"""
         try:
-            openai_cfg = self.config['openai']
+            openai_cfg = self.config.get('openai', {})
+            api_key = openai_cfg.get('apiKey', '')
+            
+            # 如果没有配置 API Key，跳过初始化
+            if not api_key or api_key.strip() == '':
+                logging.info('OpenAI API Key 未配置，AI 功能将不可用（如不需要可忽略）')
+                self.openai_client = None
+                return
+            
             self.openai_client = OpenAI(
-                api_key=openai_cfg['apiKey'],
-                base_url='https://api.openai.com/v1'
+                api_key=api_key,
+                base_url=openai_cfg.get('baseUrl', 'https://api.openai.com/v1')
             )
+            # 测试连接
             self.openai_client.models.list()
             logging.info('OpenAI 客户端初始化成功')
         except Exception as e:
-            logging.warning(f'无法连接 OpenAI 服务: {e}')
+            # 只在有 API Key 但连接失败时才显示警告
+            if openai_cfg.get('apiKey', '').strip():
+                logging.warning(f'OpenAI 连接失败: {str(e)}')
             self.openai_client = None
     
     def check_and_reload(self):
@@ -84,13 +95,13 @@ class ConfigManager:
                 logging.info('检测到配置文件更新，正在重新加载...')
                 self.load_config()
                 return True
+            return False
         except Exception as e:
             logging.error(f'检查配置文件更新失败: {e}')
-        return False
+            return False
     
     def get(self, *keys, default=None):
-        """安全获取配置项"""
-        self.check_and_reload()  # 每次获取前检查更新
+        """安全获取配置项（不自动检查更新）"""
         value = self.config
         for key in keys:
             if isinstance(value, dict):
@@ -98,6 +109,11 @@ class ConfigManager:
             else:
                 return default
         return value if value is not None else default
+    
+    def get_with_reload(self, *keys, default=None):
+        """获取配置项（自动检查更新）"""
+        self.check_and_reload()
+        return self.get(*keys, default=default)
     
     def get_crisp_client(self):
         """获取 Crisp 客户端"""
@@ -112,10 +128,13 @@ class ConfigManager:
 # 创建全局配置管理器
 config_manager = ConfigManager()
 
-# 为了兼容性，保留旧的访问方式
-config = config_manager.config
-client = None  # crisp client，将在需要时动态获取
-openai = None  # openai client，将在需要时动态获取
+# 为了兼容性，保留旧的访问方式（供其他模块导入）
+config = config_manager.config  # 静态配置快照
+client = config_manager.get_crisp_client()  # Crisp 客户端
+openai = config_manager.get_openai_client()  # OpenAI 客户端
+
+# 导出给其他模块使用
+__all__ = ['config_manager', 'config', 'client', 'openai', 'changeButton']
 
 def changeButton(sessionId, boolean):
     return InlineKeyboardMarkup(
@@ -285,15 +304,24 @@ def main():
         app.add_handler(MessageHandler(filters.PHOTO | filters.Document.IMAGE, handleImage))
         app.add_handler(CallbackQueryHandler(onChange))
         
-        # 导入 handler 并执行
-        import handler
-        app.job_queue.run_once(handler.exec, 5, name='RTM')
+        # 延迟导入 handler 模块，确保模块完全加载
+        try:
+            import handler
+            if hasattr(handler, 'exec'):
+                app.job_queue.run_once(handler.exec, 5, name='RTM')
+                logging.info("Handler RTM 任务已添加")
+            else:
+                logging.warning("Handler 模块中未找到 exec 函数")
+        except ImportError as e:
+            logging.error(f"无法导入 handler 模块: {e}")
         
         logging.info("Telegram Bot 启动成功，配置支持热加载")
         app.run_polling(drop_pending_updates=True)
         
     except Exception as error:
         logging.error(f'无法启动 Telegram Bot: {error}')
+        import traceback
+        traceback.print_exc()
         exit(1)
 
 
