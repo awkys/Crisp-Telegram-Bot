@@ -29,10 +29,40 @@ git clone https://github.com/DyAxy/Crisp-Telegram-Bot.git
 # 你需要安装好 pip3 的包管理
 cd Crisp-Telegram-Bot
 pip3 install -r requirements.txt --break-system-packages
-cp config.yml.example config.yml
+#cp config.yml.example config.yml
 nano config.yml
 # 根据注释中的内容修改配置
 python3 bot.py
+```
+
+- 使用 systemd
+
+vi /etc/systemd/system/crisp-bot.service
+
+```systemd
+[Unit]
+Description=Telegram Bot Service
+After=network.target
+
+[Service]
+# 运行的用户（可改成你的用户名）
+User=www-data
+WorkingDirectory=/var/www/Crisp-Telegram-Bot
+
+# 如果你的系统是 Debian/Ubuntu，一般 Python3 路径如下：
+ExecStart=/usr/bin/python3 /var/www/Crisp-Telegram-Bot/bot.py
+
+# 遇到错误自动重启
+Restart=always
+RestartSec=5
+
+# 日志输出位置
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+
 ```
 
 ## 申请 Telegram Bot Token
