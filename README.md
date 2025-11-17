@@ -29,11 +29,10 @@ git clone https://github.com/DyAxy/Crisp-Telegram-Bot.git
 # 你需要安装好 pip3 的包管理
 cd Crisp-Telegram-Bot
 pip3 install -r requirements.txt --break-system-packages
-#cp config.yml.example config.yml
 nano config.yml
-# 根据注释中的内容修改配置
-python3 bot.py
 ```
+
+systemctl restart crisp-bot.service
 
 - 使用 systemd
 
@@ -62,7 +61,6 @@ StandardError=journal
 
 [Install]
 WantedBy=multi-user.target
-
 ```
 
 ## 申请 Telegram Bot Token
