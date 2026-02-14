@@ -220,11 +220,24 @@ async def handleImage(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def upload_image_to_easyimages(file_url, api_url, api_token):
     try:
-        response = requests.get(file_url, stream=True)
+        response = requests.get(file_url)
         response.raise_for_status()
+        content = response.content
+        
+        # Calculate MD5
+        import hashlib
+        md5_hash = hashlib.md5(content).hexdigest()
+        
+        # Get extension
+        ext = os.path.splitext(file_url)[1]
+        if not ext:
+            ext = '.jpg'
+            
+        filename = f"{md5_hash}{ext}"
+        mime_type = response.headers.get('Content-Type', 'image/jpeg')
 
         files = {
-            'image': ('image.jpg', response.raw, 'image/jpeg'),
+            'image': (filename, content, mime_type),
             'token': (None, api_token)
         }
         res = requests.post(api_url, files=files)

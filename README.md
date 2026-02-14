@@ -1,5 +1,9 @@
 # Crisp Telegram Bot via Python
 
+## 部署
+
+- 地址（bun）：195.245.241.191
+
 ## 此项目已不再维护，请移步：https://ai.haruka.cloud
 
 一个简单的项目，让 Crisp 客服系统支持透过 Telegram Bot 来快速回复。  
