@@ -222,7 +222,11 @@ async def handleImage(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     except Exception as e:
         error_msg = f"图片上传失败: {str(e)}"
-        await msg.reply_text(error_msg)
+        # 使用 parse_mode=None 避免错误消息中的 HTML 标签导致发送失败
+        try:
+            await msg.reply_text(error_msg, parse_mode=None)
+        except Exception:
+            await msg.reply_text("图片上传失败，请查看服务器日志", parse_mode=None)
         logging.error(error_msg)
 
 def upload_image_to_easyimages(file_url, api_url, api_token):
