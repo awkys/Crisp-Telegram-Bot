@@ -201,6 +201,15 @@ async def handleImage(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # 上传图片到 EasyImages
         uploaded_url = upload_image_to_easyimages(file_url, api_url, api_token)
+        logging.info(f"原始上传 URL: {uploaded_url}")
+
+        # 如果配置了 publicUrl，替换 localhost
+        public_url = config_manager.get('easyimages', 'publicUrl')
+        if public_url and ('127.0.0.1' in uploaded_url or 'localhost' in uploaded_url):
+            from urllib.parse import urlparse, urljoin
+            parsed = urlparse(uploaded_url)
+            uploaded_url = f"{public_url.rstrip('/')}{parsed.path}"
+            logging.info(f"替换后 URL: {uploaded_url}")
 
         # 生成 Markdown 格式的链接
         markdown_link = f"![Image]({uploaded_url})"
@@ -210,7 +219,7 @@ async def handleImage(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if session_id:
             # 将 Markdown 链接推送给客户
             send_markdown_to_client(session_id, markdown_link)
-            await msg.reply_text("图片已成功发送给客户！")
+            await msg.reply_text(f"图片已成功发送给客户！\n链接: {uploaded_url}")
         else:
             await msg.reply_text("未找到对应的 Crisp 会话，无法发送给客户。")
 
