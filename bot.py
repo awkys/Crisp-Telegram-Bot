@@ -191,25 +191,16 @@ async def handleImage(update: Update, context: ContextTypes.DEFAULT_TYPE):
         file = await context.bot.get_file(file_id)
         file_url = file.file_path
 
-        # 动态获取 EasyImages 配置
-        api_url = config_manager.get('easyimages', 'apiUrl', default='')
-        api_token = config_manager.get('easyimages', 'apiToken', default='')
+        # 动态获取 imgbb 配置
+        api_key = config_manager.get('imgbb', 'apiKey', default='')
         
-        if not api_url or not api_token:
-            await msg.reply_text("EasyImages 配置不完整，无法上传图片。")
+        if not api_key:
+            await msg.reply_text("imgbb API Key 未配置，无法上传图片。")
             return
 
-        # 上传图片到 EasyImages
-        uploaded_url = upload_image_to_easyimages(file_url, api_url, api_token)
-        logging.info(f"原始上传 URL: {uploaded_url}")
-
-        # 如果配置了 publicUrl，替换 localhost
-        public_url = config_manager.get('easyimages', 'publicUrl')
-        if public_url and ('127.0.0.1' in uploaded_url or 'localhost' in uploaded_url):
-            from urllib.parse import urlparse, urljoin
-            parsed = urlparse(uploaded_url)
-            uploaded_url = f"{public_url.rstrip('/')}{parsed.path}"
-            logging.info(f"替换后 URL: {uploaded_url}")
+        # 上传图片到 imgbb
+        uploaded_url = upload_image_to_imgbb(file_url, api_key)
+        logging.info(f"图片上传成功: {uploaded_url}")
 
         # 查找对应的 Crisp 会话 ID
         session_id = get_target_session_id(context, msg.message_thread_id)
@@ -229,50 +220,33 @@ async def handleImage(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await msg.reply_text("图片上传失败，请查看服务器日志", parse_mode=None)
         logging.error(error_msg)
 
-def upload_image_to_easyimages(file_url, api_url, api_token):
+def upload_image_to_imgbb(file_url, api_key):
+    """上传图片到 imgbb 图床"""
+    import base64
     try:
+        # 下载图片
         response = requests.get(file_url)
         response.raise_for_status()
-        content = response.content
         
-        # Calculate MD5
-        import hashlib
-        md5_hash = hashlib.md5(content).hexdigest()
+        # 转为 base64
+        image_base64 = base64.b64encode(response.content).decode('utf-8')
         
-        # Get extension safely
-        from urllib.parse import urlparse
-        parsed = urlparse(file_url)
-        ext = os.path.splitext(parsed.path)[1]
-        if not ext:
-            ext = '.jpg'
-            
-        filename = f"{md5_hash}{ext}"
-        mime_type = response.headers.get('Content-Type', 'image/jpeg')
-
-        # Send token as data, image as file
-        files = {
-            'image': (filename, content, mime_type)
-        }
-        data = {
-            'token': api_token
+        # 调用 imgbb API
+        url = "https://api.imgbb.com/1/upload"
+        payload = {
+            'key': api_key,
+            'image': image_base64
         }
         
-        # Disable SSL verification for local requests or if certificate is expired
-        import urllib3
-        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-        res = requests.post(api_url, files=files, data=data, verify=False)
+        res = requests.post(url, data=payload, timeout=30)
+        res_data = res.json()
         
-        try:
-            res_data = res.json()
-        except ValueError:
-            raise Exception(f"Invalid JSON response: {res.text}")
-
-        if res_data.get("result") == "success":
-            return res_data["url"]
+        if res_data.get("success"):
+            return res_data["data"]["display_url"]
         else:
-            raise Exception(f"API Error: {res_data}")
+            raise Exception(f"imgbb API 错误: {res_data}")
     except Exception as e:
-        logging.error(f"Error uploading image: {e}")
+        logging.error(f"上传图片到 imgbb 失败: {e}")
         raise
 
 def get_target_session_id(context, thread_id):
