@@ -247,7 +247,10 @@ def upload_image_to_easyimages(file_url, api_url, api_token):
             'token': api_token
         }
         
-        res = requests.post(api_url, files=files, data=data)
+        # Disable SSL verification for local requests or if certificate is expired
+        import urllib3
+        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+        res = requests.post(api_url, files=files, data=data, verify=False)
         
         try:
             res_data = res.json()
