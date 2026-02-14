@@ -225,9 +225,51 @@ async def handleImage(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.reply_text(error_msg)
         logging.error(error_msg)
 
-# ... (upload_image_to_easyimages remains same) ...
+def upload_image_to_easyimages(file_url, api_url, api_token):
+    try:
+        response = requests.get(file_url)
+        response.raise_for_status()
+        content = response.content
+        
+        # Calculate MD5
+        import hashlib
+        md5_hash = hashlib.md5(content).hexdigest()
+        
+        # Get extension safely
+        from urllib.parse import urlparse
+        parsed = urlparse(file_url)
+        ext = os.path.splitext(parsed.path)[1]
+        if not ext:
+            ext = '.jpg'
+            
+        filename = f"{md5_hash}{ext}"
+        mime_type = response.headers.get('Content-Type', 'image/jpeg')
 
-def get_target_session_id(context, thread_id):
+        # Send token as data, image as file
+        files = {
+            'image': (filename, content, mime_type)
+        }
+        data = {
+            'token': api_token
+        }
+        
+        # Disable SSL verification for local requests or if certificate is expired
+        import urllib3
+        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+        res = requests.post(api_url, files=files, data=data, verify=False)
+        
+        try:
+            res_data = res.json()
+        except ValueError:
+            raise Exception(f"Invalid JSON response: {res.text}")
+
+        if res_data.get("result") == "success":
+            return res_data["url"]
+        else:
+            raise Exception(f"API Error: {res_data}")
+    except Exception as e:
+        logging.error(f"Error uploading image: {e}")
+        raise
     for session_id, session_data in context.bot_data.items():
         if session_data.get('topicId') == thread_id:
             return session_id
