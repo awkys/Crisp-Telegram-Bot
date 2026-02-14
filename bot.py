@@ -215,8 +215,9 @@ async def handleImage(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await msg.reply_text("未找到对应的 Crisp 会话，无法发送给客户。")
 
     except Exception as e:
-        await msg.reply_text("图片上传失败，请稍后重试。")
-        logging.error(f"图片上传错误: {e}")
+        error_msg = f"图片上传失败: {str(e)}"
+        await msg.reply_text(error_msg)
+        logging.error(error_msg)
 
 def upload_image_to_easyimages(file_url, api_url, api_token):
     try:
@@ -228,25 +229,35 @@ def upload_image_to_easyimages(file_url, api_url, api_token):
         import hashlib
         md5_hash = hashlib.md5(content).hexdigest()
         
-        # Get extension
-        ext = os.path.splitext(file_url)[1]
+        # Get extension safely
+        from urllib.parse import urlparse
+        parsed = urlparse(file_url)
+        ext = os.path.splitext(parsed.path)[1]
         if not ext:
             ext = '.jpg'
             
         filename = f"{md5_hash}{ext}"
         mime_type = response.headers.get('Content-Type', 'image/jpeg')
 
+        # Send token as data, image as file
         files = {
-            'image': (filename, content, mime_type),
-            'token': (None, api_token)
+            'image': (filename, content, mime_type)
         }
-        res = requests.post(api_url, files=files)
-        res_data = res.json()
+        data = {
+            'token': api_token
+        }
+        
+        res = requests.post(api_url, files=files, data=data)
+        
+        try:
+            res_data = res.json()
+        except ValueError:
+            raise Exception(f"Invalid JSON response: {res.text}")
 
         if res_data.get("result") == "success":
             return res_data["url"]
         else:
-            raise Exception(f"Image upload failed: {res_data}")
+            raise Exception(f"API Error: {res_data}")
     except Exception as e:
         logging.error(f"Error uploading image: {e}")
         raise
