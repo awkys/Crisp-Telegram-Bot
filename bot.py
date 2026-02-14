@@ -270,6 +270,8 @@ def upload_image_to_easyimages(file_url, api_url, api_token):
     except Exception as e:
         logging.error(f"Error uploading image: {e}")
         raise
+
+def get_target_session_id(context, thread_id):
     for session_id, session_data in context.bot_data.items():
         if session_data.get('topicId') == thread_id:
             return session_id
