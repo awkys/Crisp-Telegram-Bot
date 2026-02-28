@@ -8,7 +8,8 @@ from threading import Lock
 from openai import OpenAI
 from crisp_api import Crisp
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
-from telegram.ext import Application, Defaults, MessageHandler, filters, ContextTypes, CallbackQueryHandler
+from telegram.ext import Application, Defaults, MessageHandler, filters, ContextTypes, CallbackQueryHandler, PicklePersistence
+import time
 
 # Enable logging
 logging.basicConfig(
@@ -303,6 +304,44 @@ async def onChange(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         except Exception as error:
             logging.error(f"更改按钮状态失败: {error}")
 
+async def cleanup_old_topics(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """清理超过 3 天不活跃的 Telegram 话题"""
+    group_id = config_manager.get('bot', 'groupId')
+    if not group_id: 
+        return
+        
+    # 3天，单位秒
+    expire_time = 3 * 24 * 3600
+    current_time = time.time()
+    to_delete = []
+    
+    for session_id, session_data in list(context.bot_data.items()):
+        if not isinstance(session_data, dict):
+            continue
+            
+        last_active = session_data.get('last_active', 0)
+        topic_id = session_data.get('topicId')
+        
+        # 针对之前没有 last_active 的历史数据，先赋值当前时间
+        if last_active == 0:
+            session_data['last_active'] = current_time
+            continue
+
+        if (current_time - last_active) > expire_time and topic_id:
+            try:
+                # 尝试删除话题（如果只是想关闭，可以使用 close_forum_topic）
+                await context.bot.delete_forum_topic(chat_id=group_id, message_thread_id=topic_id)
+                logging.info(f"已删除超过 3 天不活跃的话题，Topic ID: {topic_id}")
+            except Exception as e:
+                # 如果找不到或者没有权限，捕获错误并跳过
+                logging.warning(f"删除话题失败 Topic ID {topic_id}: {e}")
+            finally:
+                to_delete.append(session_id)
+                
+    for session_id in to_delete:
+        if session_id in context.bot_data:
+            del context.bot_data[session_id]
+
 def main():
     try:
         # 动态获取 Bot Token
@@ -310,7 +349,10 @@ def main():
         if not bot_token:
             raise ValueError("Bot Token 未配置")
         
-        app = Application.builder().token(bot_token).defaults(Defaults(parse_mode='HTML')).build()
+        # 持久化存储
+        persistence = PicklePersistence(filepath='bot_data.pickle')
+        
+        app = Application.builder().token(bot_token).defaults(Defaults(parse_mode='HTML')).persistence(persistence).build()
         
         # 启动 Bot
         if os.getenv('RUNNER_NAME') is not None:
@@ -319,6 +361,9 @@ def main():
         app.add_handler(MessageHandler(filters.TEXT, onReply))
         app.add_handler(MessageHandler(filters.PHOTO | filters.Document.IMAGE, handleImage))
         app.add_handler(CallbackQueryHandler(onChange))
+        
+        # 定时任务：每小时执行一次清理，第一次启动后 1 分钟执行
+        app.job_queue.run_repeating(cleanup_old_topics, interval=3600, first=60)
         
         # 延迟导入 handler 模块，确保模块完全加载
         try:
