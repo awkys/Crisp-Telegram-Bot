@@ -9,6 +9,10 @@ Python 版本需求 >= 3.9
 
 ## 更新
 
+ps -ef|grep python
+kill 1161582
+systemctl restart crisp-bot.service
+
 ## 现有功能
 
 - 基于 Crisp 客服系统
