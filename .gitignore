@@ -1,5 +1,5 @@
 # Temp
-*.yml
+# *.yml
 *.pem
 test/
 # vscode environment
