@@ -1,13 +1,16 @@
 # Crisp Telegram Bot via Python
 
-## 此项目已不再维护，请移步：https://ai.haruka.cloud
+## 此项目已不再维护，请移步：<https://ai.haruka.cloud>
 
 一个简单的项目，让 Crisp 客服系统支持透过 Telegram Bot 来快速回复。  
 使用反馈、功能定制可加群：[https://t.me/dyaogroup](https://t.me/dyaogroup)
 
 Python 版本需求 >= 3.9
 
+## 更新
+
 ## 现有功能
+
 - 基于 Crisp 客服系统
 - 基于 Telegram 话题群将消息分栏
 - 自动推送文字、图片到指定聊天
@@ -16,9 +19,11 @@ Python 版本需求 >= 3.9
 - 关键词回复以及基于GPT的智能回复
 
 ## 计划功能
+
 - 回复图片功能（需要Crisp订阅）
 
 ## 常规使用
+
 ```
 # apt install git 如果你没有git的话
 git clone https://github.com/DyAxy/Crisp-Telegram-Bot.git
