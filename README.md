@@ -38,8 +38,7 @@ journalctl -u crisp-bot.service -f
 apt update
 apt install -y git python3 python3-pip python3-venv python3-full
 
-# 拉取项目，按需二选一
-git clone https://github.com/DyAxy/Crisp-Telegram-Bot.git
+# 拉取项目
 git clone git@github.com:awkys/Crisp-Telegram-Bot.git
 
 cd Crisp-Telegram-Bot
