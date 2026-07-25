@@ -9,9 +9,14 @@ Python 版本需求 >= 3.9
 
 ## 更新
 
-ps -ef|grep python
-kill 1161582
+```bash
+cd /var/www/Crisp-Telegram-Bot
+git pull
+source .venv/bin/activate
+pip install -r requirements.txt
 systemctl restart crisp-bot.service
+journalctl -u crisp-bot.service -f
+```
 
 ## 现有功能
 
@@ -28,17 +33,72 @@ systemctl restart crisp-bot.service
 
 ## 常规使用
 
-```
-# apt install git 如果你没有git的话
+```bash
+# 安装系统依赖
+apt update
+apt install -y git python3 python3-pip python3-venv python3-full
+
+# 拉取项目，按需二选一
 git clone https://github.com/DyAxy/Crisp-Telegram-Bot.git
-# 进程常驻可参考 screen 或 nohup 或 systemctl
-# 你需要安装好 pip3 的包管理
+git clone git@github.com:awkys/Crisp-Telegram-Bot.git
+
 cd Crisp-Telegram-Bot
-pip3 install -r requirements.txt
+
+# Debian/Ubuntu 新版本不建议直接 pip3 install 到系统环境，使用虚拟环境部署
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+pip install -r requirements.txt
+
 cp config.yml.example config.yml
 nano config.yml
-# 根据注释中的内容修改配置
+
+# 根据注释修改 Telegram、Crisp、OpenAI 等配置后，先前台测试
 python3 bot.py
+```
+
+如果执行 `pip3 install -r requirements.txt` 出现 `externally-managed-environment`，说明当前系统启用了 PEP 668 保护。请使用上面的 `.venv` 虚拟环境方式安装，不建议使用 `--break-system-packages`。
+
+## systemd 常驻运行
+
+假设项目路径为 `/var/www/Crisp-Telegram-Bot`，并且已经按上方步骤创建 `.venv`、安装依赖、配置好 `config.yml`，可以创建 systemd 服务：
+
+```bash
+cat > /etc/systemd/system/crisp-bot.service <<'EOF'
+[Unit]
+Description=Crisp Telegram Bot
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/var/www/Crisp-Telegram-Bot
+ExecStart=/var/www/Crisp-Telegram-Bot/.venv/bin/python /var/www/Crisp-Telegram-Bot/bot.py
+Restart=always
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload
+systemctl enable --now crisp-bot.service
+systemctl status crisp-bot.service
+```
+
+查看日志：
+
+```bash
+journalctl -u crisp-bot.service -f
+```
+
+常用命令：
+
+```bash
+systemctl restart crisp-bot.service
+systemctl stop crisp-bot.service
+systemctl start crisp-bot.service
+systemctl status crisp-bot.service
 ```
 
 ## 申请 Telegram Bot Token
