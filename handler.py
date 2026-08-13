@@ -1,4 +1,7 @@
 
+import asyncio
+import logging
+
 import bot
 import json
 import base64
@@ -164,7 +167,8 @@ def getCrispConnectEndpoints():
     ).decode("utf-8")
     payload = ""
     headers = {"X-Crisp-Tier": "plugin", "Authorization": "Basic " + authtier}
-    response = requests.request("GET", url, headers=headers, data=payload)
+    response = requests.request("GET", url, headers=headers, data=payload, timeout=10)
+    response.raise_for_status()
     endPoint = json.loads(response.text).get("data").get("socket").get("app")
     return endPoint
 
@@ -173,9 +177,20 @@ async def exec(context: ContextTypes.DEFAULT_TYPE):
     global callbackContext
     callbackContext = context
     # await sendAllUnread()
+    if sio.connected:
+        return
     await sio.connect(
         getCrispConnectEndpoints(),
         transports="websocket",
         wait_timeout=10,
     )
-    await sio.wait()
+
+
+async def shutdown(application):
+    if sio.connected:
+        try:
+            await asyncio.wait_for(sio.disconnect(), timeout=5)
+        except asyncio.TimeoutError:
+            logging.warning("Crisp Socket.IO 连接未能在 5 秒内断开，继续停止服务")
+        except Exception as error:
+            logging.warning("停止 Crisp Socket.IO 连接时出错，继续停止服务: %s", error)

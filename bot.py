@@ -187,7 +187,13 @@ async def onChange(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 def main():
     try:
-        app = Application.builder().token(config['bot']['token']).defaults(Defaults(parse_mode='HTML')).build()
+        app = (
+            Application.builder()
+            .token(config['bot']['token'])
+            .defaults(Defaults(parse_mode='HTML'))
+            .post_stop(handler.shutdown)
+            .build()
+        )
         # 启动 Bot
         if os.getenv('RUNNER_NAME') is not None:
             return
