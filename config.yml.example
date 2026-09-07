@@ -29,6 +29,7 @@ userLookup:
       passwordEnv: BUNSRF_DB_PASSWORD
       tablePrefix: v2_
     - name: metron-mm
+      # Metron/SSPanel 也兼容写成 type: mysql 或 type: sspanel
       type: metron
       host: 127.0.0.1
       port: 3306

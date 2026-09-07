@@ -20,6 +20,7 @@ groupId = config["bot"]["groupId"]
 websiteId = config["crisp"]["website"]
 payload = config["openai"]["payload"]
 USER_LOOKUP_WARNED = set()
+USER_LOOKUP_EMPTY_WARNED = False
 DB_TIMEOUTS = {
     "connect_timeout": 3,
     "read_timeout": 5,
@@ -75,6 +76,23 @@ def get_config_value(source, key, default=None):
 
     return default
 
+def get_first_config_value(source, keys, default=None):
+    for key in keys:
+        value = get_config_value(source, key)
+        if value not in (None, ""):
+            return value
+    return default
+
+def mask_email(email):
+    if not email or "@" not in email:
+        return email or ""
+    name, domain = email.split("@", 1)
+    if len(name) <= 2:
+        masked_name = name[:1] + "*"
+    else:
+        masked_name = name[:2] + "*" * min(len(name) - 2, 6)
+    return f"{masked_name}@{domain}"
+
 def quote_identifier(identifier):
     identifier = str(identifier or "")
     if not re.fullmatch(r"[A-Za-z0-9_]+", identifier):
@@ -97,6 +115,7 @@ def build_activity_tables(site_config, default_tables, table_prefix=""):
     return tables
 
 def get_lookup_sites():
+    global USER_LOOKUP_EMPTY_WARNED
     lookup_config = config.get("userLookup", {})
     if lookup_config.get("enabled", True) is False:
         return []
@@ -114,22 +133,29 @@ def get_lookup_sites():
             "tablePrefix": legacy_config.get("tablePrefix", "v2_"),
             **legacy_db,
         }]
+    if not USER_LOOKUP_EMPTY_WARNED:
+        logging.warning("未配置 userLookup.sites，无法按邮箱查询网站套餐/到期/流量信息")
+        USER_LOOKUP_EMPTY_WARNED = True
     return []
 
 def get_site_db_config(site_config):
-    database = get_config_value(site_config, "database")
-    user = get_config_value(site_config, "user")
-    password = get_config_value(site_config, "password", "")
+    database = get_first_config_value(site_config, ("database", "db", "dbname"))
+    user = get_first_config_value(site_config, ("user", "username"))
+    password = get_first_config_value(site_config, ("password", "pass"), "")
     if not database or not user:
+        logging.warning(
+            "用户查询站点配置不完整 site=%s：缺少 database/db 或 user/username",
+            site_config.get("name", site_config.get("host", "unknown")),
+        )
         return None
 
     return {
-        "host": get_config_value(site_config, "host", "127.0.0.1"),
-        "port": int(get_config_value(site_config, "port", 3306)),
+        "host": get_first_config_value(site_config, ("host", "hostname"), "127.0.0.1"),
+        "port": int(get_first_config_value(site_config, ("port",), 3306)),
         "user": user,
         "password": password,
         "database": database,
-        "charset": get_config_value(site_config, "charset", "utf8mb4"),
+        "charset": get_first_config_value(site_config, ("charset",), "utf8mb4"),
     }
 
 def table_exists(cursor, table):
@@ -213,6 +239,11 @@ def query_v2board_user(cursor, site_config, email):
     )
     row = cursor.fetchone() or {}
     if not row:
+        logging.info(
+            "用户查询未匹配 site=%s type=v2board email=%s",
+            site_config.get("name", site_config.get("host", "unknown")),
+            mask_email(email),
+        )
         return {}
 
     activity_tables = build_activity_tables(site_config, V2BOARD_ACTIVITY_TABLES, table_prefix)
@@ -261,6 +292,11 @@ def query_metron_user(cursor, site_config, email):
     )
     row = cursor.fetchone() or {}
     if not row:
+        logging.info(
+            "用户查询未匹配 site=%s type=metron email=%s",
+            site_config.get("name", site_config.get("host", "unknown")),
+            mask_email(email),
+        )
         return {}
 
     last_used_at = query_last_activity(
@@ -294,7 +330,7 @@ def query_user_profile_for_site(email, site_config):
         )
         with connection:
             with connection.cursor() as cursor:
-                if db_type == "metron":
+                if db_type in ("metron", "mysql", "sspanel", "sspanel-uim"):
                     return query_metron_user(cursor, site_config, email)
                 return query_v2board_user(cursor, site_config, email)
     except ImportError:
@@ -307,13 +343,20 @@ def query_user_profile_for_site(email, site_config):
 
 def query_user_profiles_across_sites(email):
     if not email:
+        logging.info("Crisp 会话没有邮箱，跳过网站套餐/到期/流量查询")
         return []
 
     profiles = []
-    for site_config in get_lookup_sites():
+    sites = get_lookup_sites()
+    if not sites:
+        return []
+
+    for site_config in sites:
         profile = query_user_profile_for_site(email, site_config)
         if profile:
             profiles.append(profile)
+    if not profiles:
+        logging.info("所有已配置站点均未查到用户 email=%s", mask_email(email))
     return profiles
 
 def get_crisp_conversation(session_id):
