@@ -19,30 +19,63 @@ userLookup:
   # 可选：用于按 Crisp 邮箱查询多个网站的用户到期时间、剩余流量、上次使用时间
   enabled: true
   sites:
-    - name: bunsrf
-      type: v2board
-      host: 127.0.0.1
-      port: 3306
-      database: v2board
-      user: v2board
-      # password: password
-      passwordEnv: BUNSRF_DB_PASSWORD
-      tablePrefix: v2_
-    - name: metron-mm
-      # Metron/SSPanel 也兼容写成 type: mysql 或 type: sspanel
-      type: metron
-      host: 127.0.0.1
+    - name: xhj
+      type: sspanel
+      host: 103.201.130.166
       port: 3306
       database: sspanel
-      user: sspanel
-      # password: password
-      passwordEnv: METRON_MM_DB_PASSWORD
+      user: root
+      password: "oneky_mysql_Admin6688"
       userTable: user
-      # 可选：按顺序尝试这些表获取上次使用时间
       activityTables:
         - user_traffic_log
         - user_subscribe_log
         - alive_ip
+    - name: mm
+      # Metron/SSPanel 也兼容写成 type: mysql 或 type: sspanel
+      type: mysql
+      host: 70.39.207.232
+      port: 3306
+      database: sspanel_mm
+      user: sspanel_mm
+      password: "mm_mysql_Admin/738?"
+      userTable: user
+      activityTables:
+        - user_traffic_log
+        - user_subscribe_log
+        - alive_ip
+    - name: ym
+      type: mysql
+      host: 103.118.252.128
+      port: 3306
+      database: sspanel_ym
+      user: sspanel_ym
+      password: "yx_mysql_Admin321?"
+      userTable: user
+      activityTables:
+        - user_traffic_log
+        - user_subscribe_log
+        - alive_ip
+    - name: nx
+      type: mysql
+      host: 70.39.207.232
+      port: 3306
+      database: sspanel_nx
+      user: sspanel_nx
+      password: "nx_mysql_Admin6688?"
+      userTable: user
+      activityTables:
+        - user_traffic_log
+        - user_subscribe_log
+        - alive_ip
+    - name: bunsurf
+      type: v2board
+      host: vip.bunsurf.xyz
+      port: 3306
+      database: v2board
+      user: root
+      password: "ym_Admin_6688?"
+      tablePrefix: v2_
 
 autoreply:
   # 自动关键词回复，你可以复制成多行，每个关键词用 `|` 隔开即可，在 `:` 后输入自动回复内容
