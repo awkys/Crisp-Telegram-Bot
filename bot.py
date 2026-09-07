@@ -3,6 +3,7 @@ import os
 import yaml
 import logging
 import requests
+import mimetypes
 
 from openai import OpenAI
 from crisp_api import Crisp
@@ -81,55 +82,109 @@ async def onReply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             )
             return
 
-# EasyImages Config
+# Image upload config
+IMGBB_API_URL = 'https://api.imgbb.com/1/upload'
+IMGBB_API_KEY = config.get('imgbb', {}).get('apiKey', '')
 EASYIMAGES_API_URL = config.get('easyimages', {}).get('apiUrl', '')
 EASYIMAGES_API_TOKEN = config.get('easyimages', {}).get('apiToken', '')
 
 async def handleImage(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.effective_message
 
+    if msg.chat_id != config['bot']['groupId']:
+        return
+
     if msg.photo:
         file_id = msg.photo[-1].file_id
-    elif msg.document and msg.document.mime_type.startswith('image/'):
+        filename = f'{file_id}.jpg'
+        mime_type = 'image/jpeg'
+    elif msg.document and (msg.document.mime_type or '').startswith('image/'):
         file_id = msg.document.file_id
+        filename = msg.document.file_name or 'image'
+        mime_type = msg.document.mime_type
     else:
         await msg.reply_text("请发送图片文件。")
         return
 
     try:
+        # 查找对应的 Crisp 会话 ID
+        session_id = get_target_session_id(context, msg.message_thread_id)
+        if not session_id:
+            await msg.reply_text("未找到对应的 Crisp 会话，无法发送给客户。")
+            return
+
         # 获取文件下载 URL
         file = await context.bot.get_file(file_id)
         file_url = file.file_path
 
-        # 上传图片到 EasyImages
-        uploaded_url = upload_image_to_easyimages(file_url)
+        # 上传图片到已配置的图床
+        uploaded_url = upload_image(file_url, filename, mime_type)
 
-        # 生成 Markdown 格式的链接
-        markdown_link = f"![Image]({uploaded_url})"
-
-        # 查找对应的 Crisp 会话 ID
-        session_id = get_target_session_id(context, msg.message_thread_id)
-        if session_id:
-            # 将 Markdown 链接推送给客户
-            send_markdown_to_client(session_id, markdown_link)
-            await msg.reply_text("图片已成功发送给客户！")
-        else:
-            await msg.reply_text("未找到对应的 Crisp 会话，无法发送给客户。")
+        # 将图片作为 Crisp 文件消息推送给客户
+        send_image_to_client(session_id, uploaded_url, filename, mime_type)
+        if msg.caption:
+            send_text_to_client(session_id, msg.caption)
+        await msg.reply_text("图片已成功发送给客户！")
 
     except Exception as e:
         await msg.reply_text("图片上传失败，请稍后重试。")
         logging.error(f"图片上传错误: {e}")
 
-def upload_image_to_easyimages(file_url):
+def upload_image(file_url, filename='image.jpg', mime_type=None):
+    if IMGBB_API_KEY:
+        return upload_image_to_imgbb(file_url, filename, mime_type)
+    if EASYIMAGES_API_URL and EASYIMAGES_API_TOKEN:
+        return upload_image_to_easyimages(file_url, filename, mime_type)
+    raise ValueError("未配置图片上传服务，请配置 imgbb.apiKey 或 easyimages.apiUrl/apiToken")
+
+def download_telegram_image(file_url):
+    response = requests.get(file_url, timeout=30)
+    response.raise_for_status()
+    return response.content
+
+def normalize_image_upload_meta(filename, mime_type):
+    filename = filename or 'image.jpg'
+    mime_type = mime_type or mimetypes.guess_type(filename)[0] or 'image/jpeg'
+    return filename, mime_type
+
+def upload_image_to_imgbb(file_url, filename='image.jpg', mime_type=None):
     try:
-        response = requests.get(file_url, stream=True)
-        response.raise_for_status()
+        filename, mime_type = normalize_image_upload_meta(filename, mime_type)
+        image_data = download_telegram_image(file_url)
 
         files = {
-            'image': ('image.jpg', response.raw, 'image/jpeg'),
-            'token': (None, EASYIMAGES_API_TOKEN)
+            'image': (filename, image_data, mime_type),
         }
-        res = requests.post(EASYIMAGES_API_URL, files=files)
+        res = requests.post(
+            IMGBB_API_URL,
+            params={'key': IMGBB_API_KEY},
+            files=files,
+            timeout=60,
+        )
+        res.raise_for_status()
+        res_data = res.json()
+
+        image_url = res_data.get('data', {}).get('url')
+        if res_data.get('success') is True and image_url:
+            return image_url
+        raise Exception(f"ImgBB upload failed: {res_data}")
+    except Exception as e:
+        logging.error(f"Error uploading image to ImgBB: {e}")
+        raise
+
+def upload_image_to_easyimages(file_url, filename='image.jpg', mime_type=None):
+    try:
+        filename, mime_type = normalize_image_upload_meta(filename, mime_type)
+        image_data = download_telegram_image(file_url)
+
+        files = {
+            'image': (filename, image_data, mime_type),
+        }
+        data = {
+            'token': EASYIMAGES_API_TOKEN,
+        }
+        res = requests.post(EASYIMAGES_API_URL, data=data, files=files, timeout=60)
+        res.raise_for_status()
         res_data = res.json()
 
         if res_data.get("result") == "success":
@@ -146,12 +201,11 @@ def get_target_session_id(context, thread_id):
             return session_id
     return None
 
-def send_markdown_to_client(session_id, markdown_link):
+def send_text_to_client(session_id, content):
     try:
-        # 将 Markdown 图片链接作为纯文本发送
         query = {
             "type": "text",
-            "content": markdown_link,  # 将图片链接当做普通文本
+            "content": content,
             "from": "operator",
             "origin": "chat",
             "user": {
@@ -164,9 +218,36 @@ def send_markdown_to_client(session_id, markdown_link):
             session_id,
             query
         )
-        logging.info(f"图片链接已成功发送至 Crisp 会话 {session_id}")
+        logging.info(f"文本已成功发送至 Crisp 会话 {session_id}")
     except Exception as e:
-        logging.error(f"发送图片链接到 Crisp 失败: {e}")
+        logging.error(f"发送文本到 Crisp 失败: {e}")
+        raise
+
+def send_image_to_client(session_id, image_url, filename='image.jpg', mime_type=None):
+    try:
+        filename, mime_type = normalize_image_upload_meta(filename, mime_type)
+        query = {
+            "type": "file",
+            "content": {
+                "name": filename,
+                "url": image_url,
+                "type": mime_type,
+            },
+            "from": "operator",
+            "origin": "chat",
+            "user": {
+                "nickname": "人工客服",
+                "avatar": "https://bpic.51yuansu.com/pic3/cover/03/47/92/65e3b3b1eb909_800.jpg"
+            }
+        }
+        client.website.send_message_in_conversation(
+            config['crisp']['website'],
+            session_id,
+            query
+        )
+        logging.info(f"图片已成功发送至 Crisp 会话 {session_id}")
+    except Exception as e:
+        logging.error(f"发送图片到 Crisp 失败: {e}")
         raise
 
 async def onChange(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
