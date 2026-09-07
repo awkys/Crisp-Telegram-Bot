@@ -41,6 +41,7 @@ META_ALIASES = {
 V2BOARD_ACTIVITY_TABLES = ("v2_stat_user", "stat_user", "v2_user_traffic_log", "user_traffic_log")
 METRON_ACTIVITY_TABLES = ("user_traffic_log", "user_subscribe_log", "alive_ip")
 ACTIVITY_TIME_COLUMNS = ("log_time", "request_time", "datetime", "record_at", "created_at", "updated_at", "date")
+CRISP_API_BASE_URL = "https://api.crisp.chat/v1"
 
 def getKey(content: str):
     if len(config["autoreply"]) > 0:
@@ -315,6 +316,89 @@ def query_user_profiles_across_sites(email):
             profiles.append(profile)
     return profiles
 
+def get_crisp_conversation(session_id):
+    try:
+        if hasattr(client.website, "get_conversation"):
+            return client.website.get_conversation(websiteId, session_id) or {}
+    except Exception as error:
+        logging.warning("通过 Crisp SDK 获取会话失败 session=%s: %s", session_id, error)
+
+    crisp_config = config.get("crisp", {})
+    try:
+        response = requests.get(
+            f"{CRISP_API_BASE_URL}/website/{websiteId}/conversation/{session_id}",
+            auth=(crisp_config.get("id", ""), crisp_config.get("key", "")),
+            headers={"X-Crisp-Tier": "plugin"},
+            timeout=10,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        return payload.get("data") or {}
+    except Exception as error:
+        logging.warning("通过 Crisp REST 获取会话失败 session=%s: %s", session_id, error)
+    return {}
+
+def find_first_value(source, keys):
+    if not isinstance(source, dict):
+        return None
+    for key in keys:
+        value = source.get(key)
+        if value not in (None, ""):
+            return value
+    for value in source.values():
+        if isinstance(value, dict):
+            nested_value = find_first_value(value, keys)
+            if nested_value not in (None, ""):
+                return nested_value
+    return None
+
+def first_mapping(source, keys):
+    if not isinstance(source, dict):
+        return {}
+    for key in keys:
+        value = source.get(key)
+        if isinstance(value, dict):
+            return value
+    for value in source.values():
+        if isinstance(value, dict):
+            nested_value = first_mapping(value, keys)
+            if nested_value:
+                return nested_value
+    return {}
+
+def compact_join(values, separator=" / "):
+    return separator.join(str(value) for value in values if value not in (None, ""))
+
+def build_visitor_location(conversation, metas):
+    sources = [conversation, metas]
+    ip = next((find_first_value(source, ("ip", "ip_address", "remote_ip")) for source in sources if find_first_value(source, ("ip", "ip_address", "remote_ip"))), None)
+    isp = next((find_first_value(source, ("isp", "as_name", "organization", "org")) for source in sources if find_first_value(source, ("isp", "as_name", "organization", "org"))), None)
+    asn = next((find_first_value(source, ("asn", "as_number")) for source in sources if find_first_value(source, ("asn", "as_number"))), None)
+
+    geolocation = {}
+    for source in sources:
+        geolocation = first_mapping(source, ("geolocation", "geo", "location"))
+        if geolocation:
+            break
+
+    country = find_first_value(geolocation, ("country", "country_code", "country_name"))
+    region = find_first_value(geolocation, ("region", "region_code", "region_name", "province"))
+    city = find_first_value(geolocation, ("city", "city_name"))
+    location = compact_join((country, region, city))
+
+    if not ip and not location and not isp and not asn:
+        return None
+
+    details = []
+    if location:
+        details.append(location)
+    if ip:
+        details.append(str(ip))
+    network = compact_join((isp, asn), " ")
+    if network:
+        details.append(network)
+    return " | ".join(details)
+
 def parse_traffic_bytes(value):
     if value in (None, ""):
         return None
@@ -428,6 +512,8 @@ def append_profile_lines(flow, profile, include_site=True):
 
 def getMetas(sessionId):
     metas = client.website.get_conversation_metas(websiteId, sessionId)
+    conversation = get_crisp_conversation(sessionId)
+    visitor_location = build_visitor_location(conversation, metas)
     email = metas.get("email") or ""
     data = metas.get("data") or {}
     crisp_profile = build_user_profile_from_crisp_data(data)
@@ -436,6 +522,8 @@ def getMetas(sessionId):
     flow = ['📠<b>Crisp消息推送</b>','']
     if len(email) > 0:
         flow.append(f'📧<b>电子邮箱</b>：{email}')
+    if visitor_location:
+        flow.append(f'📍<b>客户位置</b>：{visitor_location}')
 
     if db_profiles:
         for index, db_profile in enumerate(db_profiles):
