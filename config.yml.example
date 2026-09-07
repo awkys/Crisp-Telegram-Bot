@@ -21,7 +21,7 @@ userLookup:
   sites:
     - name: xhj
       type: sspanel
-      websiteUrl: https://xhj.tannel.asia
+      websiteUrl: https://xhj.bnsrf.com
       host: 103.201.130.166
       port: 3306
       database: sspanel
@@ -35,7 +35,7 @@ userLookup:
     - name: mm
       # Metron/SSPanel 也兼容写成 type: mysql 或 type: sspanel
       type: mysql
-      websiteUrl: https://mm.tannel.asia
+      websiteUrl: https://mm.bnsrf.com
       host: 70.39.207.232
       port: 3306
       database: sspanel_mm
@@ -48,7 +48,7 @@ userLookup:
         - alive_ip
     - name: ym
       type: mysql
-      websiteUrl: https://ym.tannel.asia
+      websiteUrl: https://ym.bnsrf.com
       host: 103.118.252.128
       port: 3306
       database: sspanel_ym
@@ -61,7 +61,7 @@ userLookup:
         - alive_ip
     - name: nx
       type: mysql
-      websiteUrl: https://nx.tannel.asia
+      websiteUrl: https://nx.bnsrf.com
       host: 70.39.207.232
       port: 3306
       database: sspanel_nx
