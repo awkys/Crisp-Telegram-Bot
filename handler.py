@@ -43,6 +43,7 @@ V2BOARD_ACTIVITY_TABLES = ("v2_stat_user", "stat_user", "v2_user_traffic_log", "
 METRON_ACTIVITY_TABLES = ("user_traffic_log", "user_subscribe_log", "alive_ip")
 ACTIVITY_TIME_COLUMNS = ("log_time", "request_time", "datetime", "record_at", "created_at", "updated_at", "date")
 CRISP_API_BASE_URL = "https://api.crisp.chat/v1"
+EMAIL_PATTERN = re.compile(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", re.IGNORECASE)
 
 def getKey(content: str):
     if len(config["autoreply"]) > 0:
@@ -92,6 +93,49 @@ def mask_email(email):
     else:
         masked_name = name[:2] + "*" * min(len(name) - 2, 6)
     return f"{masked_name}@{domain}"
+
+def normalize_email(value):
+    if value in (None, ""):
+        return ""
+    match = EMAIL_PATTERN.search(str(value))
+    return match.group(0).strip().lower() if match else str(value).strip().lower()
+
+def extract_email_from_value(value):
+    if value in (None, ""):
+        return ""
+    if isinstance(value, str):
+        match = EMAIL_PATTERN.search(value)
+        return normalize_email(match.group(0)) if match else ""
+    if isinstance(value, dict):
+        for key in ("email", "mail", "content", "text", "nickname"):
+            email = extract_email_from_value(value.get(key))
+            if email:
+                return email
+        for item in value.values():
+            email = extract_email_from_value(item)
+            if email:
+                return email
+    if isinstance(value, (list, tuple)):
+        for item in value:
+            email = extract_email_from_value(item)
+            if email:
+                return email
+    return ""
+
+def extract_email_from_message(data):
+    if not isinstance(data, dict):
+        return ""
+    for key in ("content", "user", "visitor", "profile"):
+        email = extract_email_from_value(data.get(key))
+        if email:
+            return email
+    return ""
+
+def get_email_lookup_values(email):
+    normalized_email = normalize_email(email)
+    if not normalized_email:
+        return "", ""
+    return normalized_email, f"%{normalized_email}%"
 
 def quote_identifier(identifier):
     identifier = str(identifier or "")
@@ -194,6 +238,10 @@ def query_last_activity(cursor, user_id, activity_tables):
     return None
 
 def query_v2board_user(cursor, site_config, email):
+    normalized_email, fuzzy_email = get_email_lookup_values(email)
+    if not normalized_email:
+        return {}
+
     table_prefix = site_config.get("tablePrefix", "v2_")
     user_table_raw = f"{table_prefix or ''}{site_config.get('userTable', 'user')}"
     plan_table_raw = f"{table_prefix or ''}{site_config.get('planTable', 'plan')}"
@@ -227,17 +275,24 @@ def query_v2board_user(cursor, site_config, email):
             select_parts.append(f"p.{quote_identifier(plan_name_column)} AS `plan`")
             join_sql = f"LEFT JOIN {quote_identifier(plan_table_raw)} AS p ON p.{quote_identifier(plan_id_column)} = u.{quote_identifier(optional_columns['plan_id'])}"
 
-    cursor.execute(
-        f"""
+    query_sql = f"""
         SELECT {", ".join(select_parts)}
         FROM {user_table} AS u
         {join_sql}
-        WHERE u.{quote_identifier(optional_columns["email"])} = %s
+        WHERE LOWER(TRIM(u.{quote_identifier(optional_columns["email"])})) = %s
         LIMIT 1
-        """,
-        (email,),
-    )
+        """
+    cursor.execute(query_sql, (normalized_email,))
     row = cursor.fetchone() or {}
+    if not row and fuzzy_email:
+        cursor.execute(
+            query_sql.replace(
+                f"LOWER(TRIM(u.{quote_identifier(optional_columns['email'])})) = %s",
+                f"u.{quote_identifier(optional_columns['email'])} LIKE %s",
+            ),
+            (fuzzy_email,),
+        )
+        row = cursor.fetchone() or {}
     if not row:
         logging.info(
             "用户查询未匹配 site=%s type=v2board email=%s",
@@ -245,6 +300,11 @@ def query_v2board_user(cursor, site_config, email):
             mask_email(email),
         )
         return {}
+    logging.info(
+        "用户查询命中 site=%s type=v2board email=%s",
+        site_config.get("name", site_config.get("host", "unknown")),
+        mask_email(row.get("email") or normalized_email),
+    )
 
     activity_tables = build_activity_tables(site_config, V2BOARD_ACTIVITY_TABLES, table_prefix)
     last_used_at = query_last_activity(cursor, row.get("id"), activity_tables) if row.get("id") else None
@@ -259,6 +319,10 @@ def query_v2board_user(cursor, site_config, email):
     }
 
 def query_metron_user(cursor, site_config, email):
+    normalized_email, fuzzy_email = get_email_lookup_values(email)
+    if not normalized_email:
+        return {}
+
     user_table_raw = site_config.get("userTable", "user")
     user_table = quote_identifier(user_table_raw)
     columns = get_table_columns(cursor, user_table_raw)
@@ -281,16 +345,23 @@ def query_metron_user(cursor, site_config, email):
         for alias, column in optional_columns.items()
         if column
     ]
-    cursor.execute(
-        f"""
+    query_sql = f"""
         SELECT {", ".join(select_parts)}
         FROM {user_table}
-        WHERE {quote_identifier(optional_columns["email"])} = %s
+        WHERE LOWER(TRIM({quote_identifier(optional_columns["email"])})) = %s
         LIMIT 1
-        """,
-        (email,),
-    )
+        """
+    cursor.execute(query_sql, (normalized_email,))
     row = cursor.fetchone() or {}
+    if not row and fuzzy_email:
+        cursor.execute(
+            query_sql.replace(
+                f"LOWER(TRIM({quote_identifier(optional_columns['email'])})) = %s",
+                f"{quote_identifier(optional_columns['email'])} LIKE %s",
+            ),
+            (fuzzy_email,),
+        )
+        row = cursor.fetchone() or {}
     if not row:
         logging.info(
             "用户查询未匹配 site=%s type=metron email=%s",
@@ -298,6 +369,11 @@ def query_metron_user(cursor, site_config, email):
             mask_email(email),
         )
         return {}
+    logging.info(
+        "用户查询命中 site=%s type=metron email=%s",
+        site_config.get("name", site_config.get("host", "unknown")),
+        mask_email(row.get("email") or normalized_email),
+    )
 
     last_used_at = query_last_activity(
         cursor,
@@ -553,11 +629,11 @@ def append_profile_lines(flow, profile, include_site=True):
     if last_used_at:
         flow.append(f"🕒<b>上次使用</b>：{last_used_at}")
 
-def getMetas(sessionId):
+def getMetas(sessionId, fallback_email=None):
     metas = client.website.get_conversation_metas(websiteId, sessionId)
     conversation = get_crisp_conversation(sessionId)
     visitor_location = build_visitor_location(conversation, metas)
-    email = metas.get("email") or ""
+    email = normalize_email(fallback_email) or normalize_email(metas.get("email")) or extract_email_from_value(conversation)
     data = metas.get("data") or {}
     crisp_profile = build_user_profile_from_crisp_data(data)
     db_profiles = query_user_profiles_across_sites(email)
@@ -586,8 +662,11 @@ async def createSession(data):
     botData = callbackContext.bot_data
     sessionId = data["session_id"]
     session = botData.get(sessionId)
+    message_email = extract_email_from_message(data)
+    if session is not None and message_email:
+        session["email"] = message_email
 
-    metas = getMetas(sessionId)
+    metas = getMetas(sessionId, message_email or (session or {}).get("email"))
     if session is None:
         enableAI = False if openai is None else True
         topic = await bot.create_forum_topic(
@@ -601,11 +680,17 @@ async def createSession(data):
         botData[sessionId] = {
             'topicId': topic.message_thread_id,
             'messageId': msg.message_id,
-            'enableAI': enableAI
+            'enableAI': enableAI,
+            'email': message_email
         }
     else:
         try:
-            await bot.edit_message_text(metas,groupId,session['messageId'])
+            await bot.edit_message_text(
+                metas,
+                groupId,
+                session['messageId'],
+                reply_markup=changeButton(sessionId, session.get('enableAI', False))
+            )
         except Exception as error:
             print(error)
 
@@ -692,6 +777,36 @@ async def messageForward(data):
         return
     await createSession(data)
     await sendMessage(data)
+
+@sio.on("session:set_data")
+async def sessionDataForward(data):
+    if data.get("website_id") != websiteId:
+        return
+
+    sessionId = data.get("session_id")
+    if not sessionId:
+        return
+
+    bot = callbackContext.bot
+    botData = callbackContext.bot_data
+    session = botData.get(sessionId)
+    if session is None:
+        return
+
+    event_email = extract_email_from_message(data)
+    if event_email:
+        session["email"] = event_email
+
+    try:
+        metas = getMetas(sessionId, event_email or session.get("email"))
+        await bot.edit_message_text(
+            metas,
+            groupId,
+            session["messageId"],
+            reply_markup=changeButton(sessionId, session.get("enableAI", False))
+        )
+    except Exception as error:
+        logging.warning("刷新 Telegram 会话信息失败 session=%s: %s", sessionId, error)
 
 # Meow!
 def getCrispConnectEndpoints():
