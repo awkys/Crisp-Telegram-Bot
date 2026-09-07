@@ -21,6 +21,7 @@ userLookup:
   sites:
     - name: xhj
       type: sspanel
+      websiteUrl: https://xhj.tannel.asia
       host: 103.201.130.166
       port: 3306
       database: sspanel
@@ -34,6 +35,7 @@ userLookup:
     - name: mm
       # Metron/SSPanel 也兼容写成 type: mysql 或 type: sspanel
       type: mysql
+      websiteUrl: https://mm.tannel.asia
       host: 70.39.207.232
       port: 3306
       database: sspanel_mm
@@ -46,6 +48,7 @@ userLookup:
         - alive_ip
     - name: ym
       type: mysql
+      websiteUrl: https://ym.tannel.asia
       host: 103.118.252.128
       port: 3306
       database: sspanel_ym
@@ -58,6 +61,7 @@ userLookup:
         - alive_ip
     - name: nx
       type: mysql
+      websiteUrl: https://nx.tannel.asia
       host: 70.39.207.232
       port: 3306
       database: sspanel_nx
@@ -70,12 +74,21 @@ userLookup:
         - alive_ip
     - name: bunsurf
       type: v2board
+      websiteUrl: https://www.bnsrf.com
       host: vip.bunsurf.xyz
       port: 3306
       database: v2board
       user: root
       password: "ym_Admin_6688?"
       tablePrefix: v2_
+
+renewalReminder:
+  # 查询到套餐过期或流量用完时，自动在 Crisp 对话中提醒客户
+  enabled: true
+  cooldownSeconds: 86400
+  defaultWebsiteUrl: https://www.bnsrf.com
+  message: |
+    亲，系统检测到您的 {site} 账号{reason}，当前可能无法正常使用。请登录 {website} 购买或续费套餐。购买后请回到客户端更新订阅并重新连接。
 
 autoreply:
   # 自动关键词回复，你可以复制成多行，每个关键词用 `|` 隔开即可，在 `:` 后输入自动回复内容

@@ -3,7 +3,8 @@ import asyncio
 import logging
 import os
 import re
-from datetime import datetime
+import time
+from datetime import date, datetime
 
 import bot
 import json
@@ -24,6 +25,7 @@ USER_LOOKUP_WARNED = set()
 USER_LOOKUP_EMPTY_WARNED = False
 USER_LOOKUP_EXAMPLE_WARNED = False
 USER_LOOKUP_EXAMPLE_CACHE = None
+EXAMPLE_CONFIG_CACHE = None
 PENDING_SESSION_EMAILS = {}
 DB_TIMEOUTS = {
     "connect_timeout": 3,
@@ -48,6 +50,10 @@ METRON_ACTIVITY_TABLES = ("user_traffic_log", "user_subscribe_log", "alive_ip")
 ACTIVITY_TIME_COLUMNS = ("log_time", "request_time", "datetime", "record_at", "created_at", "updated_at", "date")
 CRISP_API_BASE_URL = "https://api.crisp.chat/v1"
 EMAIL_PATTERN = re.compile(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", re.IGNORECASE)
+DEFAULT_RENEWAL_REMINDER_MESSAGE = (
+    "亲，系统检测到您的 {site} 账号{reason}，当前可能无法正常使用。"
+    "请登录 {website} 购买或续费套餐。购买后请回到客户端更新订阅并重新连接。"
+)
 
 def getKey(content: str):
     if len(config["autoreply"]) > 0:
@@ -162,24 +168,32 @@ def build_activity_tables(site_config, default_tables, table_prefix=""):
                 tables.append(candidate)
     return tables
 
+def load_example_config():
+    global EXAMPLE_CONFIG_CACHE
+    if EXAMPLE_CONFIG_CACHE is not None:
+        return EXAMPLE_CONFIG_CACHE
+
+    EXAMPLE_CONFIG_CACHE = {}
+    example_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.yml.example")
+    if not os.path.exists(example_path):
+        return EXAMPLE_CONFIG_CACHE
+
+    try:
+        with open(example_path, "r") as file:
+            EXAMPLE_CONFIG_CACHE = yaml.safe_load(file) or {}
+    except Exception as error:
+        logging.warning("读取 config.yml.example 配置失败: %s", error)
+    return EXAMPLE_CONFIG_CACHE
+
 def load_example_user_lookup():
     global USER_LOOKUP_EXAMPLE_CACHE
     if USER_LOOKUP_EXAMPLE_CACHE is not None:
         return USER_LOOKUP_EXAMPLE_CACHE
 
     USER_LOOKUP_EXAMPLE_CACHE = {}
-    example_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.yml.example")
-    if not os.path.exists(example_path):
-        return USER_LOOKUP_EXAMPLE_CACHE
-
-    try:
-        with open(example_path, "r") as file:
-            example_config = yaml.safe_load(file) or {}
-        lookup_config = example_config.get("userLookup") or {}
-        if isinstance(lookup_config, dict):
-            USER_LOOKUP_EXAMPLE_CACHE = lookup_config
-    except Exception as error:
-        logging.warning("读取 config.yml.example 的 userLookup 配置失败: %s", error)
+    lookup_config = load_example_config().get("userLookup") or {}
+    if isinstance(lookup_config, dict):
+        USER_LOOKUP_EXAMPLE_CACHE = lookup_config
     return USER_LOOKUP_EXAMPLE_CACHE
 
 def get_lookup_sites():
@@ -234,6 +248,13 @@ def get_site_db_config(site_config):
         "database": database,
         "charset": get_first_config_value(site_config, ("charset",), "utf8mb4"),
     }
+
+def get_site_website_url(site_config):
+    return get_first_config_value(
+        site_config,
+        ("websiteUrl", "websiteURL", "siteUrl", "url", "frontendUrl", "homepage"),
+        "",
+    )
 
 def table_exists(cursor, table):
     cursor.execute("SHOW TABLES LIKE %s", (table,))
@@ -344,6 +365,8 @@ def query_v2board_user(cursor, site_config, email):
 
     return {
         "site": site_config.get("name"),
+        "website_url": get_site_website_url(site_config),
+        "email": row.get("email") or normalized_email,
         "plan": row.get("plan"),
         "expired_at": row.get("expired_at"),
         "total_traffic": row.get("transfer_enable"),
@@ -416,6 +439,8 @@ def query_metron_user(cursor, site_config, email):
 
     return {
         "site": site_config.get("name"),
+        "website_url": get_site_website_url(site_config),
+        "email": row.get("email") or normalized_email,
         "plan": row.get("plan"),
         "expired_at": row.get("expired_at"),
         "total_traffic": row.get("transfer_enable"),
@@ -607,6 +632,39 @@ def format_time(value, zero_text="从未使用"):
         return datetime.fromtimestamp(timestamp).strftime("%Y-%m-%d %H:%M:%S")
     return str(value)
 
+def parse_datetime_value(value):
+    if value in (None, ""):
+        return None
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, date):
+        return datetime(value.year, value.month, value.day, 23, 59, 59)
+
+    text = str(value).strip()
+    if not text:
+        return None
+    if text.startswith("0000-00-00"):
+        return datetime.min
+
+    if text.isdigit():
+        timestamp = int(text)
+        if timestamp <= 0:
+            return datetime.min
+        if timestamp > 10 ** 12:
+            timestamp = timestamp // 1000
+        return datetime.fromtimestamp(timestamp)
+
+    normalized_text = text.replace("T", " ").replace("Z", "").replace("/", "-")
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d"):
+        try:
+            parsed = datetime.strptime(normalized_text[:19], fmt)
+            if fmt == "%Y-%m-%d":
+                parsed = datetime(parsed.year, parsed.month, parsed.day, 23, 59, 59)
+            return parsed
+        except ValueError:
+            continue
+    return None
+
 def build_user_profile_from_crisp_data(data):
     total_traffic = get_meta_value(data, META_ALIASES["total_traffic"])
     used_traffic = get_meta_value(data, META_ALIASES["used_traffic"])
@@ -644,6 +702,28 @@ def get_remaining_traffic(profile):
         return None
     return format_traffic(total_traffic - used_traffic)
 
+def get_remaining_traffic_bytes(profile):
+    remaining_traffic = parse_traffic_bytes(profile.get("remaining_traffic"))
+    if remaining_traffic is not None:
+        return remaining_traffic
+
+    total_traffic = parse_traffic_bytes(profile.get("total_traffic"))
+    used_traffic = parse_traffic_bytes(profile.get("used_traffic"))
+    if total_traffic is None or used_traffic is None:
+        return None
+    return total_traffic - used_traffic
+
+def get_profile_renewal_issues(profile):
+    issues = []
+    expired_at = parse_datetime_value(profile.get("expired_at"))
+    if expired_at is not None and expired_at < datetime.now():
+        issues.append("套餐已过期")
+
+    remaining_traffic = get_remaining_traffic_bytes(profile)
+    if remaining_traffic is not None and remaining_traffic <= 0:
+        issues.append("流量已用完")
+    return issues
+
 def append_profile_lines(flow, profile, include_site=True):
     site = profile.get("site")
     plan = profile.get("plan")
@@ -662,7 +742,87 @@ def append_profile_lines(flow, profile, include_site=True):
     if last_used_at:
         flow.append(f"🕒<b>上次使用</b>：{last_used_at}")
 
-def getMetas(sessionId, fallback_email=None):
+def get_renewal_reminder_config():
+    reminder_config = config.get("renewalReminder")
+    if isinstance(reminder_config, dict):
+        return reminder_config
+    example_reminder_config = load_example_config().get("renewalReminder") or {}
+    if isinstance(example_reminder_config, dict):
+        return example_reminder_config
+    return {}
+
+def get_renewal_website(profile):
+    reminder_config = get_renewal_reminder_config()
+    return profile.get("website_url") or reminder_config.get("defaultWebsiteUrl") or "对应网站"
+
+def build_renewal_reminder_message(profile, issues):
+    reminder_config = get_renewal_reminder_config()
+    template = reminder_config.get("message") or DEFAULT_RENEWAL_REMINDER_MESSAGE
+    params = {
+        "site": profile.get("site") or "当前网站",
+        "reason": "、".join(issues),
+        "website": get_renewal_website(profile),
+        "email": profile.get("email") or "",
+        "plan": profile.get("plan") or "",
+        "expired_at": format_time(profile.get("expired_at"), zero_text="未设置") or "",
+        "remaining_traffic": get_remaining_traffic(profile) or "",
+    }
+    try:
+        return template.format(**params)
+    except Exception as error:
+        logging.warning("续费提醒文案格式化失败，已使用默认文案: %s", error)
+        return DEFAULT_RENEWAL_REMINDER_MESSAGE.format(**params)
+
+def send_text_to_client(session_id, content, nickname="智能客服"):
+    query = {
+        "type": "text",
+        "content": content,
+        "from": "operator",
+        "origin": "chat",
+        "user": {
+            "nickname": nickname,
+            "avatar": "https://img.ixintu.com/download/jpg/20210125/8bff784c4e309db867d43785efde1daf_512_512.jpg"
+        }
+    }
+    client.website.send_message_in_conversation(websiteId, session_id, query)
+
+def maybe_send_renewal_reminder(session_id, session, profiles):
+    reminder_config = get_renewal_reminder_config()
+    if reminder_config.get("enabled", True) is False:
+        return
+
+    cooldown_seconds = int(reminder_config.get("cooldownSeconds", 86400))
+    sent_at = session.setdefault("renewalReminderSentAt", {})
+    now = int(time.time())
+
+    for profile in profiles:
+        issues = get_profile_renewal_issues(profile)
+        if not issues:
+            continue
+
+        reminder_key = "|".join([
+            profile.get("email") or "",
+            profile.get("site") or "",
+            ",".join(issues),
+        ])
+        previous_sent_at = sent_at.get(reminder_key)
+        if previous_sent_at and now - previous_sent_at < cooldown_seconds:
+            continue
+
+        message = build_renewal_reminder_message(profile, issues)
+        try:
+            send_text_to_client(session_id, message)
+            sent_at[reminder_key] = now
+            logging.info(
+                "已发送续费提醒 session=%s site=%s reason=%s",
+                session_id,
+                profile.get("site"),
+                "、".join(issues),
+            )
+        except Exception as error:
+            logging.warning("发送续费提醒失败 session=%s: %s", session_id, error)
+
+def build_session_info(sessionId, fallback_email=None):
     metas = client.website.get_conversation_metas(websiteId, sessionId)
     conversation = get_crisp_conversation(sessionId)
     visitor_location = build_visitor_location(conversation, metas)
@@ -686,8 +846,17 @@ def getMetas(sessionId, fallback_email=None):
         append_profile_lines(flow, crisp_profile, include_site=False)
 
     if len(flow) > 2:
-        return '\n'.join(flow)
-    return '无额外信息'
+        message = '\n'.join(flow)
+    else:
+        message = '无额外信息'
+    return {
+        "message": message,
+        "email": email,
+        "db_profiles": db_profiles,
+    }
+
+def getMetas(sessionId, fallback_email=None):
+    return build_session_info(sessionId, fallback_email)["message"]
 
 
 async def createSession(data):
@@ -699,7 +868,8 @@ async def createSession(data):
     if session is not None and message_email:
         session["email"] = message_email
 
-    metas = getMetas(sessionId, message_email or (session or {}).get("email"))
+    session_info = build_session_info(sessionId, message_email or (session or {}).get("email"))
+    metas = session_info["message"]
     if session is None:
         enableAI = False if openai is None else True
         topic = await bot.create_forum_topic(
@@ -716,6 +886,7 @@ async def createSession(data):
             'enableAI': enableAI,
             'email': message_email
         }
+        session = botData[sessionId]
     else:
         try:
             await bot.edit_message_text(
@@ -726,6 +897,7 @@ async def createSession(data):
             )
         except Exception as error:
             print(error)
+    maybe_send_renewal_reminder(sessionId, session, session_info["db_profiles"])
 
 async def sendMessage(data):
     bot = callbackContext.bot
@@ -836,13 +1008,15 @@ async def sessionDataForward(data):
         session["email"] = event_email
 
     try:
-        metas = getMetas(sessionId, event_email or session.get("email"))
+        session_info = build_session_info(sessionId, event_email or session.get("email"))
+        metas = session_info["message"]
         await bot.edit_message_text(
             metas,
             groupId,
             session["messageId"],
             reply_markup=changeButton(sessionId, session.get("enableAI", False))
         )
+        maybe_send_renewal_reminder(sessionId, session, session_info["db_profiles"])
     except Exception as error:
         logging.warning("刷新 Telegram 会话信息失败 session=%s: %s", sessionId, error)
 
