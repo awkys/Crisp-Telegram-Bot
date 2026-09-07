@@ -21,6 +21,7 @@ websiteId = config["crisp"]["website"]
 payload = config["openai"]["payload"]
 USER_LOOKUP_WARNED = set()
 USER_LOOKUP_EMPTY_WARNED = False
+PENDING_SESSION_EMAILS = {}
 DB_TIMEOUTS = {
     "connect_timeout": 3,
     "read_timeout": 5,
@@ -125,7 +126,7 @@ def extract_email_from_value(value):
 def extract_email_from_message(data):
     if not isinstance(data, dict):
         return ""
-    for key in ("content", "user", "visitor", "profile"):
+    for key in ("email", "data", "content", "user", "visitor", "profile", "verifications", "participants"):
         email = extract_email_from_value(data.get(key))
         if email:
             return email
@@ -662,7 +663,7 @@ async def createSession(data):
     botData = callbackContext.bot_data
     sessionId = data["session_id"]
     session = botData.get(sessionId)
-    message_email = extract_email_from_message(data)
+    message_email = extract_email_from_message(data) or PENDING_SESSION_EMAILS.pop(sessionId, "")
     if session is not None and message_email:
         session["email"] = message_email
 
@@ -760,6 +761,8 @@ async def connect():
         "password": config["crisp"]["key"],
         "events": [
             "message:send",
+            "session:set_email",
+            "session:update_verify",
             "session:set_data"
         ]})
 @sio.on("unauthorized")
@@ -791,6 +794,9 @@ async def sessionDataForward(data):
     botData = callbackContext.bot_data
     session = botData.get(sessionId)
     if session is None:
+        event_email = extract_email_from_message(data)
+        if event_email:
+            PENDING_SESSION_EMAILS[sessionId] = event_email
         return
 
     event_email = extract_email_from_message(data)
@@ -807,6 +813,14 @@ async def sessionDataForward(data):
         )
     except Exception as error:
         logging.warning("刷新 Telegram 会话信息失败 session=%s: %s", sessionId, error)
+
+@sio.on("session:set_email")
+async def sessionEmailForward(data):
+    await sessionDataForward(data)
+
+@sio.on("session:update_verify")
+async def sessionVerifyForward(data):
+    await sessionDataForward(data)
 
 # Meow!
 def getCrispConnectEndpoints():
