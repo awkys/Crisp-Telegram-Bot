@@ -15,6 +15,34 @@ crisp:
 imgbb:
   apiKey: "55f2e342a55e7937bde0bb3d2dac23cd"
 
+userLookup:
+  # 可选：用于按 Crisp 邮箱查询多个网站的用户到期时间、剩余流量、上次使用时间
+  enabled: true
+  sites:
+    - name: bunsrf
+      type: v2board
+      host: 127.0.0.1
+      port: 3306
+      database: v2board
+      user: v2board
+      # password: password
+      passwordEnv: BUNSRF_DB_PASSWORD
+      tablePrefix: v2_
+    - name: metron-mm
+      type: metron
+      host: 127.0.0.1
+      port: 3306
+      database: sspanel
+      user: sspanel
+      # password: password
+      passwordEnv: METRON_MM_DB_PASSWORD
+      userTable: user
+      # 可选：按顺序尝试这些表获取上次使用时间
+      activityTables:
+        - user_traffic_log
+        - user_subscribe_log
+        - alive_ip
+
 autoreply:
   # 自动关键词回复，你可以复制成多行，每个关键词用 `|` 隔开即可，在 `:` 后输入自动回复内容
   "在吗|你好|您好": |

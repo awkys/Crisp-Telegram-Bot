@@ -1,6 +1,9 @@
 
 import asyncio
 import logging
+import os
+import re
+from datetime import datetime
 
 import bot
 import json
@@ -16,6 +19,28 @@ changeButton = bot.changeButton
 groupId = config["bot"]["groupId"]
 websiteId = config["crisp"]["website"]
 payload = config["openai"]["payload"]
+USER_LOOKUP_WARNED = set()
+DB_TIMEOUTS = {
+    "connect_timeout": 3,
+    "read_timeout": 5,
+    "write_timeout": 5,
+}
+
+META_ALIASES = {
+    "plan": ["Plan", "plan", "plan_name", "套餐", "使用套餐"],
+    "expired_at": ["ExpiredAt", "expired_at", "ExpireAt", "expire_at", "ExpireTime", "ExpiredTime", "expired", "expire", "到期时间"],
+    "remaining_traffic": ["RemainingTraffic", "remaining_traffic", "RemainTraffic", "remain_traffic", "transfer_remaining", "剩余流量"],
+    "used_traffic": ["UsedTraffic", "used_traffic", "usedTraffic", "traffic_used", "已用流量"],
+    "total_traffic": ["AllTraffic", "TotalTraffic", "transfer_enable", "transferEnable", "total_traffic", "总流量"],
+    "upload": ["u", "upload", "UploadTraffic", "upload_traffic"],
+    "download": ["d", "download", "DownloadTraffic", "download_traffic"],
+    "last_used_at": ["LastUsedAt", "last_used_at", "last_use_at", "lastUseAt", "t", "上次使用时间", "最后使用时间"],
+    "last_login_at": ["LastLoginAt", "last_login_at", "lastLoginAt", "上次登录时间"],
+}
+
+V2BOARD_ACTIVITY_TABLES = ("v2_stat_user", "stat_user", "v2_user_traffic_log", "user_traffic_log")
+METRON_ACTIVITY_TABLES = ("user_traffic_log", "user_subscribe_log", "alive_ip")
+ACTIVITY_TIME_COLUMNS = ("log_time", "request_time", "datetime", "record_at", "created_at", "updated_at", "date")
 
 def getKey(content: str):
     if len(config["autoreply"]) > 0:
@@ -26,21 +51,400 @@ def getKey(content: str):
                     return True, config["autoreply"][x]
     return False, None
 
+def get_meta_value(data, aliases):
+    if not isinstance(data, dict):
+        return None
+    lower_map = {str(key).lower(): value for key, value in data.items()}
+    for key in aliases:
+        if key in data:
+            return data[key]
+        value = lower_map.get(str(key).lower())
+        if value is not None:
+            return value
+    return None
+
+def get_config_value(source, key, default=None):
+    value = source.get(key)
+    if value not in (None, ""):
+        return value
+
+    env_name = source.get(f"{key}Env")
+    if env_name:
+        return os.getenv(str(env_name), default)
+
+    return default
+
+def quote_identifier(identifier):
+    identifier = str(identifier or "")
+    if not re.fullmatch(r"[A-Za-z0-9_]+", identifier):
+        raise ValueError(f"不安全的数据库标识符: {identifier}")
+    return f"`{identifier}`"
+
+def build_activity_tables(site_config, default_tables, table_prefix=""):
+    configured_tables = site_config.get("activityTables")
+    if configured_tables:
+        return configured_tables
+
+    tables = []
+    for table in default_tables:
+        candidates = [table]
+        if table_prefix and not table.startswith(table_prefix):
+            candidates.insert(0, f"{table_prefix}{table}")
+        for candidate in candidates:
+            if candidate not in tables:
+                tables.append(candidate)
+    return tables
+
+def get_lookup_sites():
+    lookup_config = config.get("userLookup", {})
+    if lookup_config.get("enabled", True) is False:
+        return []
+
+    sites = lookup_config.get("sites") or []
+    if sites:
+        return sites
+
+    legacy_config = config.get("v2board", {})
+    legacy_db = legacy_config.get("database", {})
+    if legacy_db:
+        return [{
+            "name": legacy_config.get("name", "V2Board"),
+            "type": "v2board",
+            "tablePrefix": legacy_config.get("tablePrefix", "v2_"),
+            **legacy_db,
+        }]
+    return []
+
+def get_site_db_config(site_config):
+    database = get_config_value(site_config, "database")
+    user = get_config_value(site_config, "user")
+    password = get_config_value(site_config, "password", "")
+    if not database or not user:
+        return None
+
+    return {
+        "host": get_config_value(site_config, "host", "127.0.0.1"),
+        "port": int(get_config_value(site_config, "port", 3306)),
+        "user": user,
+        "password": password,
+        "database": database,
+        "charset": get_config_value(site_config, "charset", "utf8mb4"),
+    }
+
+def table_exists(cursor, table):
+    cursor.execute("SHOW TABLES LIKE %s", (table,))
+    return cursor.fetchone() is not None
+
+def get_table_columns(cursor, table):
+    cursor.execute(f"SHOW COLUMNS FROM {quote_identifier(table)}")
+    return {row["Field"]: row for row in cursor.fetchall()}
+
+def first_existing_column(columns, candidates):
+    return next((column for column in candidates if column in columns), None)
+
+def query_last_activity(cursor, user_id, activity_tables):
+    for activity_table in activity_tables:
+        if not table_exists(cursor, activity_table):
+            continue
+
+        columns = get_table_columns(cursor, activity_table)
+        user_column = first_existing_column(columns, ("user_id", "userid"))
+        time_column = first_existing_column(columns, ACTIVITY_TIME_COLUMNS)
+        if not user_column or not time_column:
+            continue
+
+        cursor.execute(
+            f"""
+            SELECT MAX({quote_identifier(time_column)}) AS last_used_at
+            FROM {quote_identifier(activity_table)}
+            WHERE {quote_identifier(user_column)} = %s
+            """,
+            (user_id,),
+        )
+        row = cursor.fetchone() or {}
+        if row.get("last_used_at") not in (None, ""):
+            return row.get("last_used_at")
+    return None
+
+def query_v2board_user(cursor, site_config, email):
+    table_prefix = site_config.get("tablePrefix", "v2_")
+    user_table_raw = f"{table_prefix or ''}{site_config.get('userTable', 'user')}"
+    plan_table_raw = f"{table_prefix or ''}{site_config.get('planTable', 'plan')}"
+    user_table = quote_identifier(user_table_raw)
+    columns = get_table_columns(cursor, user_table_raw)
+
+    optional_columns = {
+        "id": first_existing_column(columns, ("id",)),
+        "email": first_existing_column(columns, ("email",)),
+        "expired_at": first_existing_column(columns, ("expired_at", "expire_at")),
+        "transfer_enable": first_existing_column(columns, ("transfer_enable",)),
+        "upload": first_existing_column(columns, ("u", "upload")),
+        "download": first_existing_column(columns, ("d", "download")),
+        "last_used_at": first_existing_column(columns, ("t", "last_used_at", "last_login_at")),
+        "plan_id": first_existing_column(columns, ("plan_id",)),
+    }
+    if not optional_columns["email"]:
+        return {}
+
+    select_parts = [
+        f"u.{quote_identifier(column)} AS {quote_identifier(alias)}"
+        for alias, column in optional_columns.items()
+        if column and alias != "plan_id"
+    ]
+    join_sql = ""
+    if optional_columns["plan_id"] and table_exists(cursor, plan_table_raw):
+        plan_columns = get_table_columns(cursor, plan_table_raw)
+        plan_id_column = first_existing_column(plan_columns, ("id",))
+        plan_name_column = first_existing_column(plan_columns, ("name", "title"))
+        if plan_id_column and plan_name_column:
+            select_parts.append(f"p.{quote_identifier(plan_name_column)} AS `plan`")
+            join_sql = f"LEFT JOIN {quote_identifier(plan_table_raw)} AS p ON p.{quote_identifier(plan_id_column)} = u.{quote_identifier(optional_columns['plan_id'])}"
+
+    cursor.execute(
+        f"""
+        SELECT {", ".join(select_parts)}
+        FROM {user_table} AS u
+        {join_sql}
+        WHERE u.{quote_identifier(optional_columns["email"])} = %s
+        LIMIT 1
+        """,
+        (email,),
+    )
+    row = cursor.fetchone() or {}
+    if not row:
+        return {}
+
+    activity_tables = build_activity_tables(site_config, V2BOARD_ACTIVITY_TABLES, table_prefix)
+    last_used_at = query_last_activity(cursor, row.get("id"), activity_tables) if row.get("id") else None
+
+    return {
+        "site": site_config.get("name"),
+        "plan": row.get("plan"),
+        "expired_at": row.get("expired_at"),
+        "total_traffic": row.get("transfer_enable"),
+        "used_traffic": (row.get("upload") or 0) + (row.get("download") or 0),
+        "last_used_at": last_used_at or row.get("last_used_at"),
+    }
+
+def query_metron_user(cursor, site_config, email):
+    user_table_raw = site_config.get("userTable", "user")
+    user_table = quote_identifier(user_table_raw)
+    columns = get_table_columns(cursor, user_table_raw)
+
+    optional_columns = {
+        "id": first_existing_column(columns, ("id",)),
+        "email": first_existing_column(columns, ("email",)),
+        "plan": first_existing_column(columns, ("plan", "class")),
+        "expired_at": first_existing_column(columns, ("class_expire", "expire_in", "expired_at")),
+        "transfer_enable": first_existing_column(columns, ("transfer_enable",)),
+        "upload": first_existing_column(columns, ("u", "upload")),
+        "download": first_existing_column(columns, ("d", "download")),
+        "last_used_at": first_existing_column(columns, ("t", "last_check_in_time", "last_login_at")),
+    }
+    if not optional_columns["email"]:
+        return {}
+
+    select_parts = [
+        f"{quote_identifier(column)} AS {quote_identifier(alias)}"
+        for alias, column in optional_columns.items()
+        if column
+    ]
+    cursor.execute(
+        f"""
+        SELECT {", ".join(select_parts)}
+        FROM {user_table}
+        WHERE {quote_identifier(optional_columns["email"])} = %s
+        LIMIT 1
+        """,
+        (email,),
+    )
+    row = cursor.fetchone() or {}
+    if not row:
+        return {}
+
+    last_used_at = query_last_activity(
+        cursor,
+        row.get("id"),
+        build_activity_tables(site_config, METRON_ACTIVITY_TABLES),
+    ) if row.get("id") else None
+
+    return {
+        "site": site_config.get("name"),
+        "plan": row.get("plan"),
+        "expired_at": row.get("expired_at"),
+        "total_traffic": row.get("transfer_enable"),
+        "used_traffic": (row.get("upload") or 0) + (row.get("download") or 0),
+        "last_used_at": last_used_at or row.get("last_used_at"),
+    }
+
+def query_user_profile_for_site(email, site_config):
+    site_name = site_config.get("name", site_config.get("host", "unknown"))
+    db_type = str(site_config.get("type", "v2board")).lower()
+    db_config = get_site_db_config(site_config)
+    if not db_config:
+        return {}
+
+    try:
+        import pymysql
+        connection = pymysql.connect(
+            **db_config,
+            cursorclass=pymysql.cursors.DictCursor,
+            **DB_TIMEOUTS,
+        )
+        with connection:
+            with connection.cursor() as cursor:
+                if db_type == "metron":
+                    return query_metron_user(cursor, site_config, email)
+                return query_v2board_user(cursor, site_config, email)
+    except ImportError:
+        if "pymysql" not in USER_LOOKUP_WARNED:
+            logging.warning("未安装 PyMySQL，无法查询用户数据库；请执行 pip install -r requirements.txt")
+            USER_LOOKUP_WARNED.add("pymysql")
+    except Exception as error:
+        logging.warning("查询用户数据库失败 site=%s type=%s: %s", site_name, db_type, error)
+    return {}
+
+def query_user_profiles_across_sites(email):
+    if not email:
+        return []
+
+    profiles = []
+    for site_config in get_lookup_sites():
+        profile = query_user_profile_for_site(email, site_config)
+        if profile:
+            profiles.append(profile)
+    return profiles
+
+def parse_traffic_bytes(value):
+    if value in (None, ""):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    text = str(value).strip()
+    if not text:
+        return None
+    match = re.fullmatch(r"([\d.]+)\s*([kmgtp]?i?b|bytes?)?", text, re.IGNORECASE)
+    if not match:
+        return None
+    number = float(match.group(1))
+    unit = (match.group(2) or "b").lower()
+    unit = unit.replace("bytes", "b").replace("byte", "b")
+    multipliers = {
+        "b": 1,
+        "kb": 1024,
+        "kib": 1024,
+        "mb": 1024 ** 2,
+        "mib": 1024 ** 2,
+        "gb": 1024 ** 3,
+        "gib": 1024 ** 3,
+        "tb": 1024 ** 4,
+        "tib": 1024 ** 4,
+        "pb": 1024 ** 5,
+        "pib": 1024 ** 5,
+    }
+    return number * multipliers.get(unit, 1)
+
+def format_traffic(value):
+    traffic_bytes = parse_traffic_bytes(value)
+    if traffic_bytes is None:
+        return str(value) if value not in (None, "") else None
+    if traffic_bytes < 0:
+        traffic_bytes = 0
+    units = ["B", "KB", "MB", "GB", "TB", "PB"]
+    unit_index = 0
+    while traffic_bytes >= 1024 and unit_index < len(units) - 1:
+        traffic_bytes /= 1024
+        unit_index += 1
+    if unit_index == 0:
+        return f"{int(traffic_bytes)} {units[unit_index]}"
+    return f"{traffic_bytes:.2f} {units[unit_index]}"
+
+def format_time(value, zero_text="从未使用"):
+    if value in (None, ""):
+        return None
+    if isinstance(value, (int, float)) or str(value).strip().isdigit():
+        timestamp = int(float(value))
+        if timestamp <= 0:
+            return zero_text
+        if timestamp > 10 ** 12:
+            timestamp = timestamp // 1000
+        return datetime.fromtimestamp(timestamp).strftime("%Y-%m-%d %H:%M:%S")
+    return str(value)
+
+def build_user_profile_from_crisp_data(data):
+    total_traffic = get_meta_value(data, META_ALIASES["total_traffic"])
+    used_traffic = get_meta_value(data, META_ALIASES["used_traffic"])
+    upload = get_meta_value(data, META_ALIASES["upload"])
+    download = get_meta_value(data, META_ALIASES["download"])
+
+    if used_traffic is None and (upload is not None or download is not None):
+        used_traffic = (parse_traffic_bytes(upload) or 0) + (parse_traffic_bytes(download) or 0)
+
+    return {
+        "plan": get_meta_value(data, META_ALIASES["plan"]),
+        "expired_at": get_meta_value(data, META_ALIASES["expired_at"]),
+        "remaining_traffic": get_meta_value(data, META_ALIASES["remaining_traffic"]),
+        "used_traffic": used_traffic,
+        "total_traffic": total_traffic,
+        "last_used_at": get_meta_value(data, META_ALIASES["last_used_at"]),
+        "last_login_at": get_meta_value(data, META_ALIASES["last_login_at"]),
+    }
+
+def merge_missing_profile_values(primary, fallback):
+    merged = dict(primary)
+    for key, value in fallback.items():
+        if merged.get(key) in (None, "") and value not in (None, ""):
+            merged[key] = value
+    return merged
+
+def get_remaining_traffic(profile):
+    remaining_traffic = profile.get("remaining_traffic")
+    if remaining_traffic not in (None, ""):
+        return format_traffic(remaining_traffic)
+
+    total_traffic = parse_traffic_bytes(profile.get("total_traffic"))
+    used_traffic = parse_traffic_bytes(profile.get("used_traffic"))
+    if total_traffic is None or used_traffic is None:
+        return None
+    return format_traffic(total_traffic - used_traffic)
+
+def append_profile_lines(flow, profile, include_site=True):
+    site = profile.get("site")
+    plan = profile.get("plan")
+    expired_at = format_time(profile.get("expired_at"), zero_text="未设置")
+    remaining_traffic = get_remaining_traffic(profile)
+    last_used_at = format_time(profile.get("last_used_at") or profile.get("last_login_at"), zero_text="从未使用")
+
+    if include_site and site:
+        flow.append(f"🌐<b>所属网站</b>：{site}")
+    if plan not in (None, ""):
+        flow.append(f"🪪<b>使用套餐</b>：{plan}")
+    if expired_at:
+        flow.append(f"⏰<b>到期时间</b>：{expired_at}")
+    if remaining_traffic:
+        flow.append(f"📊<b>剩余流量</b>：{remaining_traffic}")
+    if last_used_at:
+        flow.append(f"🕒<b>上次使用</b>：{last_used_at}")
+
 def getMetas(sessionId):
     metas = client.website.get_conversation_metas(websiteId, sessionId)
+    email = metas.get("email") or ""
+    data = metas.get("data") or {}
+    crisp_profile = build_user_profile_from_crisp_data(data)
+    db_profiles = query_user_profiles_across_sites(email)
 
     flow = ['📠<b>Crisp消息推送</b>','']
-    if len(metas["email"]) > 0:
-        email = metas["email"]
+    if len(email) > 0:
         flow.append(f'📧<b>电子邮箱</b>：{email}')
-    if len(metas["data"]) > 0:
-        if "Plan" in metas["data"]:
-            Plan = metas["data"]["Plan"]
-            flow.append(f"🪪<b>使用套餐</b>：{Plan}")
-        if "UsedTraffic" in metas["data"] and "AllTraffic" in metas["data"]:
-            UsedTraffic = metas["data"]["UsedTraffic"]
-            AllTraffic = metas["data"]["AllTraffic"]
-            flow.append(f"🗒<b>流量信息</b>：{UsedTraffic} / {AllTraffic}")
+
+    if db_profiles:
+        for index, db_profile in enumerate(db_profiles):
+            if index > 0:
+                flow.append("")
+            append_profile_lines(flow, merge_missing_profile_values(db_profile, crisp_profile), include_site=True)
+    else:
+        append_profile_lines(flow, crisp_profile, include_site=False)
+
     if len(flow) > 2:
         return '\n'.join(flow)
     return '无额外信息'
