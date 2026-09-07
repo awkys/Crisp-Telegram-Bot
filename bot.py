@@ -2,6 +2,7 @@ import os
 import yaml
 import logging
 import requests
+import mimetypes
 from datetime import datetime
 from threading import Lock
 
@@ -181,26 +182,19 @@ async def handleImage(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if msg.photo:
         file_id = msg.photo[-1].file_id
-    elif msg.document and msg.document.mime_type.startswith('image/'):
+        file_name = f"telegram-photo-{msg.message_id}.jpg"
+        mime_type = "image/jpeg"
+    elif msg.document and (msg.document.mime_type or '').startswith('image/'):
         file_id = msg.document.file_id
+        file_name = msg.document.file_name or f"telegram-image-{msg.message_id}"
+        mime_type = msg.document.mime_type
     else:
         await msg.reply_text("请发送图片文件。")
         return
 
     try:
-        # 获取文件下载 URL
-        file = await context.bot.get_file(file_id)
-        file_url = file.file_path
-
-        # 动态获取 imgbb 配置
-        api_key = config_manager.get('imgbb', 'apiKey', default='')
-        
-        if not api_key:
-            await msg.reply_text("imgbb API Key 未配置，无法上传图片。")
-            return
-
-        # 上传图片到 imgbb
-        uploaded_url = upload_image_to_imgbb(file_url, api_key)
+        image_bytes = await download_telegram_file(context, file_id)
+        uploaded_url = upload_image_to_host(image_bytes, file_name, mime_type)
         logging.info(f"图片上传成功: {uploaded_url}")
 
         # 查找对应的 Crisp 会话 ID
@@ -221,16 +215,78 @@ async def handleImage(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await msg.reply_text("图片上传失败，请查看服务器日志", parse_mode=None)
         logging.error(error_msg)
 
-def upload_image_to_imgbb(file_url, api_key):
+async def download_telegram_file(context: ContextTypes.DEFAULT_TYPE, file_id: str) -> bytes:
+    """使用 Telegram SDK 下载文件，避免直接拼 URL 在不同部署环境下失效。"""
+    file = await context.bot.get_file(file_id)
+    data = await file.download_as_bytearray()
+    if not data:
+        raise Exception("Telegram 文件下载为空")
+    return bytes(data)
+
+def upload_image_to_host(image_bytes, file_name, mime_type):
+    """按配置上传图片，优先使用 EasyImages，失败时可回退到 imgbb。"""
+    easyimages_cfg = config_manager.get('easyimages', default={}) or {}
+    imgbb_cfg = config_manager.get('imgbb', default={}) or {}
+    errors = []
+
+    easyimages_url = easyimages_cfg.get('apiUrl', '')
+    easyimages_token = easyimages_cfg.get('apiToken', '')
+    if easyimages_url and easyimages_token:
+        try:
+            return upload_image_to_easyimages(
+                image_bytes,
+                file_name,
+                mime_type,
+                easyimages_url,
+                easyimages_token
+            )
+        except Exception as e:
+            errors.append(f"EasyImages: {e}")
+
+    imgbb_api_key = imgbb_cfg.get('apiKey', '')
+    if imgbb_api_key:
+        try:
+            return upload_image_to_imgbb(image_bytes, imgbb_api_key)
+        except Exception as e:
+            errors.append(f"imgbb: {e}")
+
+    if errors:
+        raise Exception("；".join(errors))
+
+    raise Exception("未配置图床，请配置 easyimages.apiUrl/apiToken 或 imgbb.apiKey")
+
+def upload_image_to_easyimages(image_bytes, file_name, mime_type, api_url, api_token):
+    """上传图片到 EasyImages 图床"""
+    guessed_type = mime_type or mimetypes.guess_type(file_name)[0] or "image/jpeg"
+    files = {
+        "image": (file_name or "image.jpg", image_bytes, guessed_type)
+    }
+    data = {
+        "token": api_token
+    }
+
+    try:
+        res = requests.post(api_url, files=files, data=data, timeout=30)
+        res.raise_for_status()
+        try:
+            res_data = res.json()
+        except ValueError as error:
+            raise Exception(f"EasyImages 返回非 JSON: {res.text[:300]}") from error
+
+        if res_data.get("result") == "success" and res_data.get("url"):
+            return res_data["url"]
+
+        raise Exception(f"EasyImages API 错误: {res_data}")
+    except Exception as e:
+        logging.error(f"上传图片到 EasyImages 失败: {e}")
+        raise
+
+def upload_image_to_imgbb(image_bytes, api_key):
     """上传图片到 imgbb 图床"""
     import base64
     try:
-        # 下载图片
-        response = requests.get(file_url)
-        response.raise_for_status()
-        
         # 转为 base64
-        image_base64 = base64.b64encode(response.content).decode('utf-8')
+        image_base64 = base64.b64encode(image_bytes).decode('utf-8')
         
         # 调用 imgbb API
         url = "https://api.imgbb.com/1/upload"
@@ -240,7 +296,11 @@ def upload_image_to_imgbb(file_url, api_key):
         }
         
         res = requests.post(url, data=payload, timeout=30)
-        res_data = res.json()
+        res.raise_for_status()
+        try:
+            res_data = res.json()
+        except ValueError as error:
+            raise Exception(f"imgbb 返回非 JSON: {res.text[:300]}") from error
         
         if res_data.get("success"):
             return res_data["data"]["display_url"]

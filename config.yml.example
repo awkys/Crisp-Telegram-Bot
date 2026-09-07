@@ -16,6 +16,9 @@ easyimages:
   apiUrl: "http://127.0.0.1/api/index.php"
   apiToken: "token"
 
+imgbb:
+  apiKey: ""
+
 autoreply:
   # 自动关键词回复，你可以复制成多行，每个关键词用 `|` 隔开即可，在 `:` 后输入自动回复内容
   "在吗|你好": "请说明您的问题，客服会在第一时间回复您"
