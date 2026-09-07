@@ -10,6 +10,7 @@ import json
 import base64
 import socketio
 import requests
+import yaml
 from telegram.ext import ContextTypes
 
 config = bot.config
@@ -21,6 +22,8 @@ websiteId = config["crisp"]["website"]
 payload = config["openai"]["payload"]
 USER_LOOKUP_WARNED = set()
 USER_LOOKUP_EMPTY_WARNED = False
+USER_LOOKUP_EXAMPLE_WARNED = False
+USER_LOOKUP_EXAMPLE_CACHE = None
 PENDING_SESSION_EMAILS = {}
 DB_TIMEOUTS = {
     "connect_timeout": 3,
@@ -159,8 +162,28 @@ def build_activity_tables(site_config, default_tables, table_prefix=""):
                 tables.append(candidate)
     return tables
 
+def load_example_user_lookup():
+    global USER_LOOKUP_EXAMPLE_CACHE
+    if USER_LOOKUP_EXAMPLE_CACHE is not None:
+        return USER_LOOKUP_EXAMPLE_CACHE
+
+    USER_LOOKUP_EXAMPLE_CACHE = {}
+    example_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.yml.example")
+    if not os.path.exists(example_path):
+        return USER_LOOKUP_EXAMPLE_CACHE
+
+    try:
+        with open(example_path, "r") as file:
+            example_config = yaml.safe_load(file) or {}
+        lookup_config = example_config.get("userLookup") or {}
+        if isinstance(lookup_config, dict):
+            USER_LOOKUP_EXAMPLE_CACHE = lookup_config
+    except Exception as error:
+        logging.warning("读取 config.yml.example 的 userLookup 配置失败: %s", error)
+    return USER_LOOKUP_EXAMPLE_CACHE
+
 def get_lookup_sites():
-    global USER_LOOKUP_EMPTY_WARNED
+    global USER_LOOKUP_EMPTY_WARNED, USER_LOOKUP_EXAMPLE_WARNED
     lookup_config = config.get("userLookup", {})
     if lookup_config.get("enabled", True) is False:
         return []
@@ -168,6 +191,15 @@ def get_lookup_sites():
     sites = lookup_config.get("sites") or []
     if sites:
         return sites
+
+    example_lookup_config = load_example_user_lookup()
+    if example_lookup_config.get("enabled", True) is not False:
+        example_sites = example_lookup_config.get("sites") or []
+        if example_sites:
+            if not USER_LOOKUP_EXAMPLE_WARNED:
+                logging.warning("config.yml 未配置 userLookup.sites，已使用 config.yml.example 中的用户查询配置")
+                USER_LOOKUP_EXAMPLE_WARNED = True
+            return example_sites
 
     legacy_config = config.get("v2board", {})
     legacy_db = legacy_config.get("database", {})
